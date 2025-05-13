@@ -1,0 +1,1 @@
+ 1 farad . This prototype can be impedance scaled and frequency scaled to the desired values . The low @-@ pass prototype can also be transformed into high @-@ pass , band @-@ pass or band @-@ stop types by application of suitable frequency transformations . 

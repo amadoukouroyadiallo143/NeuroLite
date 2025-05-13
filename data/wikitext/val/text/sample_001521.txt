@@ -1,0 +1,1 @@
+ The elimination step is not regioselective ; if multiple β @-@ hydrogens are available for elimination , various products are often observed as mixtures . This is highly undesirable from an efficiency standpoint as arduous separation is typically required . 

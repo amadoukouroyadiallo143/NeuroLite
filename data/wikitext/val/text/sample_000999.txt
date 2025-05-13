@@ -1,0 +1,1 @@
+ If the player collects all the Chaos Emeralds and completes the game , a reward ending sequence is shown . If all the emeralds are not collected , Robotnik taunts the player while juggling the Chaos Emeralds instead . 

@@ -1,0 +1,20 @@
+{
+  "name": "wikitext",
+  "description": "",
+  "modalities": [
+    "text"
+  ],
+  "samples": {
+    "train": 15313,
+    "val": 1649,
+    "test": 1835
+  },
+  "splits": [
+    "train",
+    "val",
+    "test"
+  ],
+  "version": "1.0",
+  "date_processed": "2025-05-08",
+  "transform_params": null
+}

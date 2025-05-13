@@ -1,0 +1,1 @@
+ Parts of this article or section rely on the reader 's knowledge of the complex impedance representation of capacitors and inductors and on knowledge of the frequency domain representation of signals . 

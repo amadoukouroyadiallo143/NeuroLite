@@ -1,0 +1,1 @@
+ Given that the filter does not contain any resistive elements , the image impedance in the pass band of the filter is purely real and in the stop band it is purely imaginary . For example , for the pictured low @-@ pass half @-@ section , 

@@ -1,0 +1,1 @@
+ For the low @-@ pass L @-@ shape section , below the cut @-@ off frequency , the transmission parameters are given by 

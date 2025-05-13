@@ -1,0 +1,1 @@
+ The classical version of the Nazarov cyclization suffers from several drawbacks which modern variants attempt to circumvent . The first two are not evident from the mechanism alone , but are indicative of the barriers to cyclization ; the last three stem from selectivity issues relating to elimination and protonation of the intermediate . 

@@ -50,13 +50,25 @@ neurolite/
 ├── routing.py         # Routage dynamique et Mixture-of-Experts
 └── symbolic.py        # Composants de raisonnement symbolique
 
+training/
+├── data_manager.py    # Gestion des données d'entraînement et validation
+├── train_generator.py # Script d'entraînement du modèle de génération
+└── train_classifier.py # Script d'entraînement du classifieur
+
+data/
+└── wikitext/         # Données d'entraînement provenant du corpus WikiText
+    ├── train/        # Données d'entraînement
+    ├── val/          # Données de validation
+    └── test/         # Données de test
+
 examples/
 ├── simple_example.py           # Exemple basique d'utilisation
 ├── classification_example.py   # Classification de texte
 ├── memory_and_routing_example.py # Démonstration mémoire et routage
 └── benchmark_comparison.py     # Comparaison avec architectures standards
 
-neurolite_demo.py      # Application de démonstration interactive
+generate_text.py     # Utilitaire de génération de texte avec modèle entraîné
+neurolite_demo.py    # Application de démonstration interactive
 ```
 
 ## 🚀 Installation
@@ -66,6 +78,9 @@ Pour installer les dépendances nécessaires:
 ```bash
 git clone https://github.com/username/NeuroLite.git
 cd NeuroLite
+python -m venv .venv
+.venv\Scripts\activate  # Sur Windows
+source .venv/bin/activate  # Sur Linux/MacOS
 pip install -r requirements.txt
 ```
 
@@ -115,6 +130,36 @@ model(input_texts=["Alice est une ingénieure vivant à Paris."], update_memory=
 
 # La requête suivante sera enrichie par le contexte en mémoire
 result = model(input_texts=["Où habite-t-elle ?"])
+```
+
+## 🏋️ Entraînement du Modèle
+
+NeuroLite comprend des scripts d'entraînement robustes pour diverses tâches. Pour entraîner un modèle de génération de texte sur le corpus WikiText :
+
+```bash
+python training/train_generator.py --data_dir "data/wikitext" --batch_size 32 --seq_length 512 --vocab_size 32000 --num_epochs 20
+```
+
+Options d'entraînement importantes :
+- `--batch_size` : Taille des batchs (défaut: 32)
+- `--seq_length` : Longueur de séquence pour l'entraînement (défaut: 128)
+- `--vocab_size` : Taille du vocabulaire (défaut: 10000)
+- `--hidden_size` : Dimension des couches cachées (défaut: 256)
+- `--num_layers` : Nombre de couches mixer (défaut: 6)
+- `--use_memory` : Activer la mémoire externe (flag)
+- `--learning_rate` : Taux d'apprentissage (défaut: 5e-5)
+- `--max_samples` : Limite le nombre d'échantillons (pour tests rapides)
+
+Pour entraîner sur un matériel limité, utilisez des paramètres plus légers :
+
+```bash
+python training/train_generator.py --data_dir "data/wikitext" --batch_size 8 --seq_length 128 --hidden_size 128 --num_layers 4 --num_epochs 5 --max_samples 1000
+```
+
+Une fois entraîné, générez du texte avec le modèle :
+
+```bash
+python generate_text.py --model_path "models/generator_ep20.pt" --prompt "NeuroLite est" --max_length 100
 ```
 
 ## 🧪 Exemples et Démonstration
@@ -168,6 +213,19 @@ config = NeuroLiteConfig(
 )
 ```
 
+## 🔄 Gestion des Données & Optimisations
+
+NeuroLite comprend des systèmes robustes pour la gestion et le traitement des données :
+
+- **WikiTextDataset** : Chargement efficace et gestion du corpus WikiText
+- **Padding intelligent** : Traitement optimal des textes plus courts que la longueur de séquence cible
+- **Tokenization optimisée** : Tokenizer rapide avec vocabulaire ajustable (jusqu'à 32K tokens)
+- **Multiprocessing** : Chargement parallèle des données pour accélérer l'entraînement
+- **Gestion de batch dynamique** : Fonction de collation robuste pour la création de batchs homogènes
+- **Intégration PyTorch** : Compatibilité complète avec l'écosystème PyTorch (DataLoader, etc.)
+
+Chaque composant est conçu pour être efficace en mémoire et en temps de calcul, même sur du matériel limité.
+
 ## 📚 Références
 
 Cette implémentation s'inspire des travaux suivants:
@@ -178,6 +236,8 @@ Cette implémentation s'inspire des travaux suivants:
 - Performer (Choromanski et al., 2020)
 - Modern Hopfield Networks (Ramsauer et al., 2020)
 - Differentiable Neural Computers (Graves et al., 2016)
+- State Space Models (Gu et al., 2023)
+- Mamba (Gu et al., 2023)
 
 ## 📄 Licence
 

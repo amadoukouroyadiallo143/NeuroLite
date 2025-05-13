@@ -1,0 +1,1 @@
+ That is , the transmission is lossless in the pass @-@ band with only the phase of the signal changing . Above the cut @-@ off frequency , the transmission parameters are : 

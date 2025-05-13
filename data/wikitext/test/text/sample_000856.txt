@@ -1,0 +1,1 @@
+ Elements L and C can be made arbitrarily small while retaining the same value of k . Z and Y however , are both approaching zero , and from the formulae ( below ) for image impedances , 

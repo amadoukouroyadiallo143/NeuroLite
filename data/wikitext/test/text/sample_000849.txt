@@ -1,0 +1,1 @@
+ The great advantage Campbell 's filters had over the RL circuit and other simple filters of the time was that they could be designed for any desired degree of stop band rejection or steepness of transition between pass band and stop band . It was only necessary to add more filter sections until the desired response was obtained . 

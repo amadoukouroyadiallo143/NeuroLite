@@ -1,0 +1,1 @@
+ The building block of constant k filters is the half @-@ section " L " network , composed of a series impedance Z , and a shunt admittance Y. The " k " in " constant k " is the value given by , 
