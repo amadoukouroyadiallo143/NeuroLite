@@ -3,7 +3,7 @@ Configuration pour les modèles NeuroLite
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Union, Any
+from typing import List, Optional, Dict, Union, Any, Tuple
 
 
 @dataclass
@@ -29,9 +29,17 @@ class NeuroLiteConfig:
     
     # Configuration mémoire externe
     use_external_memory: bool = True
-    memory_size: int = 64  # Nombre de slots de mémoire
-    memory_dim: int = 256  # Dimension de chaque slot
-    memory_update_rate: float = 0.1  # Taux de mise à jour de la mémoire
+    memory_size: int = 64  # Nombre de slots de mémoire (générique, peut-être pour une mémoire simple)
+    memory_dim: int = 256  # Dimension de chaque slot (générique)
+    memory_update_rate: float = 0.1  # Taux de mise à jour de la mémoire (générique)
+
+    # Configuration spécifique pour la mémoire hiérarchique
+    use_hierarchical_memory: bool = True # True si la mémoire externe est hiérarchique
+    short_term_memory_size: int = 32
+    long_term_memory_size: int = 64
+    persistent_memory_size: int = 128
+    novelty_threshold_stm: float = 0.7
+    novelty_threshold_ltm: float = 0.5
     
     # Configuration module symbolique
     use_symbolic_module: bool = False

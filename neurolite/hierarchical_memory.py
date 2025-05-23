@@ -12,6 +12,7 @@ import time
 import numpy as np
 from typing import Optional, Tuple, Dict, List, Union, Any
 from .memory import DifferentiableMemory
+from .config import NeuroLiteConfig
 
 class HierarchicalMemory(nn.Module):
     """
@@ -22,6 +23,7 @@ class HierarchicalMemory(nn.Module):
     
     def __init__(
         self,
+        config: NeuroLiteConfig,
         hidden_size: int = 256,
         short_term_size: int = 64,
         long_term_size: int = 256,
@@ -112,13 +114,24 @@ class HierarchicalMemory(nn.Module):
             return 1.0 # Si la mémoire est vide, tout est nouveau
 
         # Normaliser les clés pour la similarité cosinus
-        input_keys_norm = F.normalize(input_keys, p=2, dim=-1)
-        memory_keys_norm = F.normalize(memory_keys, p=2, dim=-1)
-        
-        # Calculer les similarités maximales pour chaque clé d'entrée
-        # input_keys_norm: [B, N_in, D], memory_keys_norm: [M, D] -> memory_keys_norm.t(): [D, M]
-        # similarities: [B, N_in, M]
-        similarities = torch.matmul(input_keys_norm, memory_keys_norm.t())
+        input_keys_norm = F.normalize(input_keys, p=2, dim=-1, eps=1e-12)
+        memory_keys_norm = F.normalize(memory_keys, p=2, dim=-1, eps=1e-12)
+
+        if memory_keys_norm.ndim == 3:
+            # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
+        elif memory_keys_norm.ndim == 2:
+            # Standard case [num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.t()
+        else:
+            # This case should ideally not be reached if memory_keys is always 2D or 3D [1,N,D]
+            # For safety, raise an error or handle as appropriate for other dimensions.
+            raise ValueError(
+                f"memory_keys_norm has unexpected ndim: {memory_keys_norm.ndim}. "
+                f"Shape: {memory_keys_norm.shape}. Expected 2D or 3D."
+            )
+
+        similarities = torch.matmul(input_keys_norm, memory_keys_norm_transposed)
         
         # Prendre la similarité maximale de chaque clé d'entrée avec n'importe quelle clé mémoire
         # max_similarity_per_input: [B, N_in]
@@ -187,6 +200,8 @@ class HierarchicalMemory(nn.Module):
         """
         Traite un seul chunk de la séquence d'entrée.
         """
+        update_mem_base_flag = update_memory
+        
         batch_size, seq_len, _ = hidden_states.shape
         
         # Simuler l'effet d'oubli en fonction du temps écoulé
@@ -223,7 +238,6 @@ class HierarchicalMemory(nn.Module):
         else:
             # Pour les séquences courtes, projeter les requêtes normalement
             queries = self.query_projection(hidden_states)
-            update_mem_base_flag = update_memory # Flag initial basé sur l'appelant
         
         # --- Logique de Consolidation Intelligente ---
         update_ltm_flag = False
@@ -450,14 +464,26 @@ class VectorMemoryStore(nn.Module):
         query_keys = self.key_projection(hidden_states)  # [batch, seq, key_size]
         
         # Normalisation L2 pour la recherche par similarité cosinus
-        query_keys = F.normalize(query_keys, p=2, dim=-1)
+        query_keys = F.normalize(query_keys, p=2, dim=-1, eps=1e-12)
         
         # Calculer les similarités avec les clés stockées
         memory_keys_norm = F.normalize(self.memory_keys, p=2, dim=-1)
-        
-        # Calculer les similarités pour toutes les entrées du batch
-        # [batch, seq, memory_size]
-        similarities = torch.matmul(query_keys, memory_keys_norm.t())
+
+        if memory_keys_norm.ndim == 3:
+            # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
+        elif memory_keys_norm.ndim == 2:
+            # Standard case [num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.t()
+        else:
+            # This case should ideally not be reached if memory_keys is always 2D or 3D [1,N,D]
+            # For safety, raise an error or handle as appropriate for other dimensions.
+            raise ValueError(
+                f"memory_keys_norm has unexpected ndim: {memory_keys_norm.ndim}. "
+                f"Shape: {memory_keys_norm.shape}. Expected 2D or 3D."
+            )
+
+        similarities = torch.matmul(query_keys, memory_keys_norm_transposed)
         
         # Appliquer une fonction de température pour accentuer les différences
         similarities = similarities / 0.1
@@ -498,7 +524,7 @@ class VectorMemoryStore(nn.Module):
         # Si les clés n'ont pas été fournies, les calculer
         if keys is None:
             keys = self.key_projection(hidden_states)
-            keys = F.normalize(keys, p=2, dim=-1)
+            keys = F.normalize(keys, p=2, dim=-1, eps=1e-12)
         
         # Calculer les valeurs
         values = self.value_projection(hidden_states)
@@ -515,7 +541,22 @@ class VectorMemoryStore(nn.Module):
             
             # Vérifier la similarité avec les entrées existantes
             memory_keys_norm = F.normalize(self.memory_keys, p=2, dim=-1)
-            similarities = torch.matmul(key, memory_keys_norm.t()).squeeze(0)
+
+            if memory_keys_norm.ndim == 3:
+                # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
+                memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
+            elif memory_keys_norm.ndim == 2:
+                # Standard case [num_slots, key_dim]
+                memory_keys_norm_transposed = memory_keys_norm.t()
+            else:
+                # This case should ideally not be reached if memory_keys is always 2D or 3D [1,N,D]
+                # For safety, raise an error or handle as appropriate for other dimensions.
+                raise ValueError(
+                    f"memory_keys_norm has unexpected ndim: {memory_keys_norm.ndim}. "
+                    f"Shape: {memory_keys_norm.shape}. Expected 2D or 3D."
+                )
+
+            similarities = torch.matmul(key, memory_keys_norm_transposed).squeeze(0)
             
             # Trouver l'entrée la plus similaire
             max_sim, max_idx = torch.max(similarities, dim=0)
@@ -524,13 +565,13 @@ class VectorMemoryStore(nn.Module):
             if max_sim > self.similarity_threshold and self.memory_usage[max_idx] > 0:
                 # Interpolation entre ancienne et nouvelle valeur
                 self.memory_values[max_idx] = (
-                    (1 - self.update_rate) * self.memory_values[max_idx] +
+                    (1 - self.update_rate) * self.memory_values[max_idx].detach() +
                     self.update_rate * value
                 )
                 
                 # Mettre à jour la clé également
                 self.memory_keys[max_idx] = (
-                    (1 - self.update_rate) * self.memory_keys[max_idx] +
+                    (1 - self.update_rate) * self.memory_keys[max_idx].detach() +
                     self.update_rate * key
                 )
                 
@@ -547,29 +588,43 @@ class VectorMemoryStore(nn.Module):
                     idx = torch.argmin(self.memory_usage).item()
                 
                 # Stocker la nouvelle entrée
-                self.memory_keys[idx] = key
-                self.memory_values[idx] = value
+                keys_part1 = self.memory_keys[:idx].detach()
+                keys_part2 = self.memory_keys[idx+1:].detach()
+                self.memory_keys = torch.cat((keys_part1, key, keys_part2), dim=0)
+
+                values_part1 = self.memory_values[:idx].detach()
+                values_part2 = self.memory_values[idx+1:].detach()
+                self.memory_values = torch.cat((values_part1, value, values_part2), dim=0)
+                
                 self.memory_usage[idx] = 1
     
     def save(self, path: str):
         """Sauvegarde la mémoire sur disque"""
-        state_dict = {
-            'memory_keys': self.memory_keys,
-            'memory_values': self.memory_values,
-            'memory_usage': self.memory_usage,
-            'active_entries': self.active_entries,
-            'metadata': self.metadata
-        }
-        torch.save(state_dict, path)
+        if hasattr(self, 'save'):
+            self.save(path)
+        else:
+            # Sauvegarde manuelle des tenseurs
+            state_dict = {
+                'memory_keys': self.memory_keys,
+                'memory_values': self.memory_values,
+                'memory_usage': self.memory_usage,
+                'active_entries': self.active_entries,
+                'metadata': self.metadata
+            }
+            torch.save(state_dict, path)
         
     def load(self, path: str):
         """Charge la mémoire depuis le disque"""
-        state_dict = torch.load(path)
-        self.memory_keys = state_dict['memory_keys']
-        self.memory_values = state_dict['memory_values']
-        self.memory_usage = state_dict['memory_usage']
-        self.active_entries = state_dict['active_entries']
-        self.metadata = state_dict['metadata']
+        if hasattr(self, 'load'):
+            self.load(path)
+        else:
+            # Chargement manuel des tenseurs
+            state_dict = torch.load(path)
+            self.memory_keys = state_dict['memory_keys']
+            self.memory_values = state_dict['memory_values']
+            self.memory_usage = state_dict['memory_usage']
+            self.active_entries = state_dict['active_entries']
+            self.metadata = state_dict['metadata']
         
     def search(
         self, 
@@ -588,13 +643,26 @@ class VectorMemoryStore(nn.Module):
         """
         # Projeter la requête en clé
         query_key = self.key_projection(query)
-        query_key = F.normalize(query_key, p=2, dim=-1)
+        query_key = F.normalize(query_key, p=2, dim=-1, eps=1e-12)
         
         # Normaliser les clés en mémoire
         memory_keys_norm = F.normalize(self.memory_keys, p=2, dim=-1)
-        
-        # Calculer les similarités
-        similarities = torch.matmul(query_key, memory_keys_norm.t())
+
+        if memory_keys_norm.ndim == 3:
+            # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
+        elif memory_keys_norm.ndim == 2:
+            # Standard case [num_slots, key_dim]
+            memory_keys_norm_transposed = memory_keys_norm.t()
+        else:
+            # This case should ideally not be reached if memory_keys is always 2D or 3D [1,N,D]
+            # For safety, raise an error or handle as appropriate for other dimensions.
+            raise ValueError(
+                f"memory_keys_norm has unexpected ndim: {memory_keys_norm.ndim}. "
+                f"Shape: {memory_keys_norm.shape}. Expected 2D or 3D."
+            )
+
+        similarities = torch.matmul(query_key, memory_keys_norm_transposed)
         
         # Masquer les entrées inutilisées
         mask = (self.memory_usage > 0).float()

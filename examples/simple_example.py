@@ -1,12 +1,23 @@
+print("--- TOP LEVEL PRINT: SCRIPT HAS STARTED ---")
+
 """
 Exemple simple d'utilisation de NeuroLite avec fonctionnalités de base
 """
 
 import torch
 import os
+import sys
+
+# Add the project root to the Python path
+# Assuming this script is in 'examples' subdirectory of the project root
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from neurolite import NeuroLiteModel, NeuroLiteConfig
 
 def main():
+    print("--- SCRIPT EXECUTION STARTED ---")
     # Créer une configuration pour un modèle très léger
     config = NeuroLiteConfig.tiny()
     
@@ -40,13 +51,13 @@ def main():
     # Désactiver le calcul de gradients pour l'inférence
     with torch.no_grad():
         # Premier lot: mise à jour de la mémoire
-        outputs_1 = model(input_texts=samples_1, update_memory=True)
+        outputs_1 = model(multimodal_inputs={'text': samples_1}, update_memory=True)
         
     # Afficher les dimensions de sortie
-    print(f"Forme des sorties: {outputs_1.shape}")
-    print(f"- Batch size: {outputs_1.shape[0]}")
-    print(f"- Longueur de séquence: {outputs_1.shape[1]}")
-    print(f"- Dimension cachée: {outputs_1.shape[2]}")
+    print(f"Forme des sorties: {outputs_1['hidden_states'].shape}")
+    print(f"- Batch size: {outputs_1['hidden_states'].shape[0]}")
+    print(f"- Longueur de séquence: {outputs_1['hidden_states'].shape[1]}")
+    print(f"- Dimension cachée: {outputs_1['hidden_states'].shape[2]}")
     
     # Deuxième lot de textes liés au contexte précédent
     samples_2 = [
@@ -59,16 +70,16 @@ def main():
     
     with torch.no_grad():
         # Second lot: utilise la mémoire du premier lot
-        outputs_2 = model(input_texts=samples_2, update_memory=True)
+        outputs_2 = model(multimodal_inputs={'text': samples_2}, update_memory=True)
         
         # Traiter à nouveau le premier lot pour démontrer l'effet de la mémoire
-        outputs_1_with_memory = model(input_texts=samples_1, update_memory=False)
+        outputs_1_with_memory = model(multimodal_inputs={'text': samples_1}, update_memory=False)
     
     # Exemple d'utilisation de la représentation (ex: similarité cosinus)
     # Prendre la moyenne sur la dimension de séquence pour obtenir un embedding par texte
-    embeddings_1 = torch.mean(outputs_1, dim=1)
-    embeddings_2 = torch.mean(outputs_2, dim=1)
-    embeddings_1_with_mem = torch.mean(outputs_1_with_memory, dim=1)
+    embeddings_1 = torch.mean(outputs_1['hidden_states'], dim=1)
+    embeddings_2 = torch.mean(outputs_2['hidden_states'], dim=1)
+    embeddings_1_with_mem = torch.mean(outputs_1_with_memory['hidden_states'], dim=1)
     
     # Combiner tous les embeddings pour l'analyse
     all_embeddings = torch.cat([embeddings_1, embeddings_2, embeddings_1_with_mem], dim=0)
@@ -101,9 +112,10 @@ def main():
     
     # Vérifier que le modèle chargé conserve bien sa mémoire
     with torch.no_grad():
-        test_output = loaded_model(input_texts=["Test de la mémoire persistante"])
+        test_output = loaded_model(multimodal_inputs={'text': ["Test de la mémoire persistante"]})
     
     print("Modèle chargé avec succès!\n")
+    print("--- SCRIPT EXECUTION FINISHED ---")
 
 if __name__ == "__main__":
     main()

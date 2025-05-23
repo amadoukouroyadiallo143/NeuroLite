@@ -19,7 +19,7 @@ class SymbolicError(Exception):
     """Classe de base pour les erreurs dans le module symbolique."""
     pass
 
-classMalformedFactError(SymbolicError):
+class MalformedFactError(SymbolicError):
     """Erreur levée lorsqu'un fait est malformé."""
     pass
 
@@ -119,7 +119,7 @@ class SymbolicRuleEngine:
         Raises:
             FileNotFoundError: Si le fichier n'est pas trouvé.
             json.JSONDecodeError: Si le JSON est malformé.
-            SymbolicError: Pour des erreurs de format dans les règles ou faits.
+            SymbolicError: Pour des erreurs de format dans les règles ou faits chargés.
         """
         try:
             with open(rules_file, 'r', encoding='utf-8') as f:
@@ -605,7 +605,7 @@ class NeuralSymbolicLayer(nn.Module):
                     entity_j_str_id = item_entity_str_ids[j]
                     
                     # Exemple de logique de création de prédicats basée sur la similarité
-                    # Ces noms de prédicats ("similaire", "liéÀ") seront mappés à des embeddings apprenables.
+                    # Ces noms de prédicats ("similaire", "liéÀ") seront mappés à des embeddings.
                     if similarity_score > 0.7:
                         current_item_predicates.append(f"similaire({entity_i_str_id}, {entity_j_str_id})")
                     elif similarity_score > 0.3:

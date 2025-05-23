@@ -122,6 +122,7 @@ class NeuroLiteModel(nn.Module):
         if config.use_external_memory:
             if getattr(config, 'use_hierarchical_memory', False):
                 self.memory = HierarchicalMemory(
+                    config=self.config, # Pass the config object
                     hidden_size=config.hidden_size,
                     short_term_size=getattr(config, 'short_term_memory_size', 64),
                     long_term_size=getattr(config, 'long_term_memory_size', config.memory_size),

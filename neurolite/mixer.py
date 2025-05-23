@@ -81,6 +81,19 @@ class MixerLayer(nn.Module):
         self.dropout_rate = dropout_rate
         self.activation = activation
         
+        # Initial token_mix MLP (will be replaced if seq_len changes in forward pass)
+        # This ensures the submodule exists for state_dict loading.
+        # The dim for token_mix MLP is seq_len because it mixes across tokens for each channel.
+        # The hidden_dim calculation matches what _create_token_mix would do for max_seq_len.
+        _initial_token_mix_mlp_input_dim = self.max_seq_len
+        _initial_token_mix_mlp_hidden_dim = min(self.token_mixing_hidden_dim, self.max_seq_len * 2)
+        self.token_mix = MLPBlock(
+            dim=_initial_token_mix_mlp_input_dim, 
+            hidden_dim=_initial_token_mix_mlp_hidden_dim,
+            dropout_rate=self.dropout_rate,
+            activation=self.activation
+        )
+        
         # MLP pour le channel-mixing (mélange entre features)
         self.channel_mix = MLPBlock(
             dim=dim,
@@ -99,52 +112,45 @@ class MixerLayer(nn.Module):
         Returns:
             Tensor transformé [batch_size, seq_len, dim]
         """
-        batch_size, seq_len, dim = x.shape
+        batch_size, current_seq_len, model_dim = x.shape
         
         # Token-mixing
-        residual = x
-        x = self.norm1(x)
-        x_transposed = rearrange(x, 'b s d -> b d s')
+        residual_token_mix = x
+        x_norm_token_mix = self.norm1(x) # shape: [b, current_seq_len, model_dim]
         
-        # Créer dynamiquement un MLPBlock adapté à la longueur de séquence actuelle
-        if not hasattr(self, 'token_mix') or self._get_token_mix_dim() != seq_len:
-            self._create_token_mix(seq_len)
+        # Transpose for token mixing: MLP acts on features of size current_seq_len (for each of model_dim channels)
+        x_transposed = rearrange(x_norm_token_mix, 'b s d -> b d s') # shape: [b, model_dim, current_seq_len]
+        
+        # Pad if current_seq_len is less than self.max_seq_len (which token_mix expects)
+        if current_seq_len < self.max_seq_len:
+            padding_size = self.max_seq_len - current_seq_len
+            # Pad on the right of the last dimension (sequence dimension for x_transposed)
+            x_padded = F.pad(x_transposed, (0, padding_size))
+        elif current_seq_len == self.max_seq_len:
+            x_padded = x_transposed
+        else: # current_seq_len > self.max_seq_len
+            # Truncate if input sequence is longer than what the token_mix MLP is configured for.
+            # This loses information but makes the model runnable. A better solution might be an error or sliding window.
+            x_padded = x_transposed[:, :, :self.max_seq_len]
             
-        # Appliquer le token_mix adapté à la séquence actuelle
-        x_mixed = self.token_mix(x_transposed)
-        x = rearrange(x_mixed, 'b d s -> b s d')
-        x = x + residual
+        x_mixed_padded = self.token_mix(x_padded) # token_mix output: [b, model_dim, self.max_seq_len]
+        
+        # Truncate if padding was applied or if original input was truncated
+        if current_seq_len < self.max_seq_len:
+            x_mixed = x_mixed_padded[:, :, :current_seq_len] # Truncate back to original current_seq_len
+        else: # current_seq_len >= self.max_seq_len (covers equality and the truncation case)
+            x_mixed = x_mixed_padded # Output is already at self.max_seq_len (either due to no padding or input truncation)
+
+        x_untransposed = rearrange(x_mixed, 'b d s -> b s d') # shape: [b, current_seq_len or self.max_seq_len, model_dim]
+        x = x_untransposed + residual_token_mix
         
         # Channel-mixing
-        residual = x
-        x = self.norm2(x)
-        x = self.channel_mix(x)
-        x = x + residual
+        residual_channel_mix = x
+        x_norm_channel_mix = self.norm2(x)
+        x = self.channel_mix(x_norm_channel_mix)
+        x = x + residual_channel_mix
         
         return x
-        
-    def _get_token_mix_dim(self) -> int:
-        """Retourne la dimension d'entrée du token_mix actuel"""
-        if hasattr(self, 'token_mix'):
-            return self.token_mix.fc1.in_features
-        return 0
-        
-    def _create_token_mix(self, seq_len: int) -> None:
-        """Crée un nouveau MLPBlock adapté à la longueur de séquence donnée"""
-        # Calcul des dimensions du token_mix en fonction de la séquence actuelle
-        hidden_dim = min(self.token_mixing_hidden_dim, seq_len * 2)  # S'adapter à la séquence
-        
-        # Créer le nouveau token_mix
-        self.token_mix = MLPBlock(
-            dim=seq_len,
-            hidden_dim=hidden_dim,
-            dropout_rate=self.dropout_rate,
-            activation=self.activation
-        )
-        
-        # Déplacer vers le même device que le module parent
-        if next(self.parameters()).is_cuda:
-            self.token_mix = self.token_mix.cuda()
 
 
 class HyperMixer(nn.Module):
