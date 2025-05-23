@@ -29,6 +29,11 @@ NeuroLite combine plusieurs innovations récentes en une architecture hybride l�
     - **Couche Neurosymbolique (`NeuralSymbolicLayer`)**: Intègre le `SymbolicRuleEngine` dans le pipeline neuronal. Cette couche peut extraire des entités et relations potentielles des états cachés du modèle, les affirmer comme faits transitoires au moteur de règles, initier une phase d'inférence, puis réintégrer les faits dérivés dans les représentations neuronales. Elle supporte le traitement par batch et utilise des embeddings apprenables pour les types de prédicats et les identifiants d'entités symboliques, permettant au modèle d'apprendre à interpréter et utiliser les résultats du raisonnement symbolique. Le fichier `rules.json` (configurable via `symbolic_rules_file` dans `NeuroLiteConfig`) est utilisé pour charger les règles et faits persistants.
     - **Réseau Bayésien (`BayesianBeliefNetwork`)**: Permet d'intégrer des connaissances probabilistes et d'effectuer du raisonnement incertain. La structure du réseau (variables et leurs dépendances) peut être définie via la configuration (`bayesian_network_structure` et `num_bayesian_variables` dans `NeuroLiteConfig`). Le module utilise un algorithme d'inférence approximative (basé sur le Likelihood Weighting) pour estimer les probabilités postérieures étant donné des évidences extraites des états neuronaux.
 5. **Routage dynamique** - Activation conditionnelle de sous-modules spécialisés via Mixture-of-Experts léger
+6. **Apprentissage Continu et Mémoire Évoluée**:
+    - **Adaptateur d'Apprentissage Continu (`ContinualAdapter`)**: Intégré au modèle, ce module vise à permettre l'apprentissage à partir de nouvelles données au fil du temps tout en atténuant l'oubli catastrophique des connaissances antérieures. Il utilise des mécanismes comme un tampon de rejeu (`replay buffer`) pour stocker des expériences passées, une détection conceptuelle de dérive de distribution (`drift detection`), et des stratégies d'adaptation du modèle. Voir `examples/lifelong_learning_demo.py`.
+    - **Mémoire Hiérarchique Améliorée (`HierarchicalMemory`)**: La mémoire hiérarchique a été dotée de capacités plus dynamiques :
+        - **Consolidation Intelligente**: Le transfert d'informations entre les niveaux de mémoire (court terme, long terme, persistant) est désormais modulé par la nouveauté des données. Les informations nouvelles et surprenantes sont priorisées pour la consolidation dans les mémoires à plus long terme, rendant les mises à jour plus sélectives et efficaces. Ceci est contrôlé par `novelty_threshold_ltm` et `novelty_threshold_pm`.
+        - **Portes Contextuelles de Mémoire**: La contribution de chaque niveau de mémoire (STM, LTM, PM) à la sortie finale est déterminée dynamiquement pour chaque token d'entrée, grâce à des poids calculés par `memory_gate` sur les requêtes. Cela permet une récupération d'informations contextuelles plus nuancée et pertinente.
 
 ## 🧠 Fondements Théoriques
 
@@ -39,6 +44,8 @@ NeuroLite s'inspire de plusieurs avancées théoriques récentes:
 - **Mémoire Associative Moderne**: Intègre des réseaux de Hopfield continus de grande capacité pour la mémorisation associative
 - **Routage Adaptatif**: Utilise des techniques de routage dynamique pour activer sélectivement différents "experts" selon le contexte
 - **Composants Neurosymboliques (étendus)**: Combine traitement neuronal avec des mécanismes de raisonnement symbolique et probabiliste plus explicites pour améliorer les capacités de raisonnement structuré et la gestion de l'incertitude, tout en maintenant une faible empreinte paramétrique.
+- **Apprentissage Continu (Lifelong Learning)**: S'inspire des approches visant à permettre aux modèles d'apprendre séquentiellement de nouvelles tâches ou données sans oublier les précédentes, en utilisant des tampons de rejeu et des mécanismes d'adaptation.
+- **Mémoires Hiérarchiques Dynamiques**: Les améliorations apportées à la mémoire s'inspirent des modèles cognitifs de la mémoire humaine, où la consolidation et la récupération sont des processus dynamiques et dépendants du contexte et de la nouveauté.
 
 ## 📦 Structure du Projet
 
@@ -49,9 +56,11 @@ neurolite/
 ├── model.py           # Modèle principal et variantes spécialisées
 ├── projection.py      # Couche de projection d'entrée (MinHash+Bloom)
 ├── mixer.py           # Implémentations MLP-Mixer, HyperMixer, FNet
-├── memory.py          # Mémoire externe différentiable
+├── memory.py          # Mémoire externe différentiable (base)
+├── hierarchical_memory.py # Mémoire hiérarchique améliorée
 ├── routing.py         # Routage dynamique et Mixture-of-Experts
-└── symbolic.py        # Composants de raisonnement symbolique
+├── symbolic.py        # Composants de raisonnement symbolique (moteur de règles, couche neurosymbolique, BBN)
+└── continual.py       # Adaptateur d'apprentissage continu
 
 training/
 ├── data_manager.py    # Gestion des données d'entraînement et validation
@@ -68,6 +77,9 @@ examples/
 ├── simple_example.py           # Exemple basique d'utilisation
 ├── classification_example.py   # Classification de texte
 ├── memory_and_routing_example.py # Démonstration mémoire et routage
+├── symbolic_reasoning_example.py # Démonstration du moteur de règles et couche neurosymbolique
+├── bayesian_network_example.py   # Démonstration du réseau bayésien
+├── lifelong_learning_demo.py     # Démonstration de l'apprentissage continu avec l'adaptateur et la mémoire hiérarchique
 └── benchmark_comparison.py     # Comparaison avec architectures standards
 
 generate_text.py     # Utilitaire de génération de texte avec modèle entraîné
@@ -229,7 +241,17 @@ config = NeuroLiteConfig(
     num_bayesian_variables=15,
     # Exemple: [(parent_idx, child_idx), ...]
     bayesian_network_structure=[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)], 
-    max_parents_bayesian=3 # Utilisé si bayesian_network_structure n'est pas fourni
+    max_parents_bayesian=3, # Utilisé si bayesian_network_structure n'est pas fourni
+
+    # Activation et configuration de l'apprentissage continu
+    use_continual_adapter=True,
+    continual_adapter_buffer_size=200, # Taille du tampon de rejeu
+    continual_adapter_rate=0.05,       # Taux d'adaptation
+    continual_adapter_drift_threshold=0.6, # Seuil de détection de dérive
+
+    # Configuration des seuils de nouveauté pour HierarchicalMemory
+    novelty_threshold_ltm=0.6, # Seuil pour la mise à jour de la mémoire à long terme
+    novelty_threshold_pm=0.7   # Seuil pour la mise à jour de la mémoire persistante
 )
 ```
 

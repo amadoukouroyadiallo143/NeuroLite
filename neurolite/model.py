@@ -184,12 +184,12 @@ class NeuroLiteModel(nn.Module):
             )
         
         # Adaptateur d'apprentissage continu (optionnel)
-        if getattr(config, 'use_continual_learning', False):
+        if getattr(config, 'use_continual_adapter', False): # Changed config name
             self.continual_adapter = ContinualAdapter(
                 hidden_size=config.hidden_size,
-                buffer_size=getattr(config, 'replay_buffer_size', 100),
-                adaptation_rate=getattr(config, 'adaptation_rate', 0.1),
-                drift_threshold=getattr(config, 'drift_threshold', 0.5),
+                buffer_size=getattr(config, 'continual_adapter_buffer_size', 100), # Changed config name
+                adaptation_rate=getattr(config, 'continual_adapter_rate', 0.1), # Changed config name
+                drift_threshold=getattr(config, 'continual_adapter_drift_threshold', 0.5), # Changed config name
                 dropout_rate=config.dropout_rate
             )
         else:
@@ -308,10 +308,6 @@ class NeuroLiteModel(nn.Module):
         symbolic_outputs = None
         plan_outputs = None
         
-        # Apprentissage continu (adaptation aux nouvelles distributions)
-        if continuous_learning and hasattr(self, 'continual_adapter'):
-            hidden_states = self.continual_adapter(hidden_states, update_memory=update_memory)
-        
         # Passage à travers les couches principales
         for layer in self.layers:
             hidden_states = layer(hidden_states)
@@ -350,13 +346,22 @@ class NeuroLiteModel(nn.Module):
                 
         # Module de planification (si activé et requis)
         if self.planner is not None and use_planning:
-            if return_symbolic:
+            if return_symbolic: # This argument is 'return_symbolic', maybe should be 'return_plan_details'?
                 hidden_states, plan_outputs = self.planner(hidden_states, 
                                                          constraints=constraints,
                                                          return_plan=True)
             else:
                 hidden_states = self.planner(hidden_states, constraints=constraints)
                 
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+        # Adaptateur d'apprentissage continu (après les couches principales et autres modules)
+        # Renamed 'continuous_learning' parameter to 'use_continual_adapter_during_forward' for clarity
+        # Or, we can assume if self.continual_adapter exists, it's always used.
+        # The original forward param was `continuous_learning`. Let's assume it controls this.
+        if continuous_learning and self.continual_adapter is not None:
+            hidden_states = self.continual_adapter(hidden_states, update_memory=update_memory)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
         

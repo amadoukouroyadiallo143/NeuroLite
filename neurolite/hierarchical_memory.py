@@ -94,7 +94,41 @@ class HierarchicalMemory(nn.Module):
         # Facteur d'oubli pour simuler une mémoire réaliste
         self.forgetting_scale = memory_forgetting_scale
         self.register_buffer('last_access_time', torch.zeros(1))
+
+        # Seuil de nouveauté pour la consolidation (configurable si besoin)
+        self.novelty_threshold_ltm = getattr(config, 'novelty_threshold_ltm', 0.5) # Example threshold
+        self.novelty_threshold_pm = getattr(config, 'novelty_threshold_pm', 0.6)  # Example threshold
         
+    def _calculate_novelty_score(self, input_keys: torch.Tensor, memory_keys: torch.Tensor) -> float:
+        """
+        Calcule un score de nouveauté moyen pour les clés d'entrée par rapport aux clés mémoire.
+        Args:
+            input_keys: Tensor de clés d'entrée [batch_size, num_input_keys, key_dim]
+            memory_keys: Tensor de clés de mémoire [num_memory_slots, key_dim]
+        Returns:
+            Score de nouveauté moyen (0 à 1, où 1 est très nouveau).
+        """
+        if memory_keys.numel() == 0 or input_keys.numel() == 0 or self.persistent_memory.active_entries == 0: # or check for active_entries for LTM if applicable
+            return 1.0 # Si la mémoire est vide, tout est nouveau
+
+        # Normaliser les clés pour la similarité cosinus
+        input_keys_norm = F.normalize(input_keys, p=2, dim=-1)
+        memory_keys_norm = F.normalize(memory_keys, p=2, dim=-1)
+        
+        # Calculer les similarités maximales pour chaque clé d'entrée
+        # input_keys_norm: [B, N_in, D], memory_keys_norm: [M, D] -> memory_keys_norm.t(): [D, M]
+        # similarities: [B, N_in, M]
+        similarities = torch.matmul(input_keys_norm, memory_keys_norm.t())
+        
+        # Prendre la similarité maximale de chaque clé d'entrée avec n'importe quelle clé mémoire
+        # max_similarity_per_input: [B, N_in]
+        max_similarity_per_input, _ = torch.max(similarities, dim=-1)
+        
+        # Score de nouveauté = 1 - similarité maximale. Moyenne sur les clés d'entrée et le batch.
+        avg_novelty = 1.0 - max_similarity_per_input.mean()
+        
+        return avg_novelty.item()
+
     def forward(
         self, 
         hidden_states: torch.Tensor,
@@ -189,51 +223,74 @@ class HierarchicalMemory(nn.Module):
         else:
             # Pour les séquences courtes, projeter les requêtes normalement
             queries = self.query_projection(hidden_states)
-            update_mem = update_memory
+            update_mem_base_flag = update_memory # Flag initial basé sur l'appelant
         
-        # Optimisation: utiliser torch.no_grad pour la récupération à partir des mémoires
-        # quand on n'a pas besoin des gradients pour cette opération
-        with torch.set_grad_enabled(self.training):
-            # Lire à partir de chaque niveau de mémoire
-            short_term_output = self.short_term_memory(
-                queries, update_memory=update_mem
-            )
-            
-            # Pour les mémoires à plus long terme, on peut économiser du calcul
-            # en utilisant le même mécanisme d'échantillonnage
-            long_term_output = self.long_term_memory(
-                queries, update_memory=update_mem
-            )
-            
-            persistent_output = self.persistent_memory(
-                queries, update_memory=update_mem
-            )
+        # --- Logique de Consolidation Intelligente ---
+        update_ltm_flag = False
+        update_pm_flag = False
+
+        if update_mem_base_flag: # Seulement si une mise à jour est envisagée
+            # Nouveauté pour la mémoire à long terme (LTM)
+            # Utiliser les clés de la LTM si elle a une structure de clé explicite,
+            # sinon memory_values si les valeurs sont utilisées comme clés implicites.
+            # DifferentiableMemory a self.memory_keys et self.memory_values.
+            # Assumons que self.long_term_memory.memory_keys sont les bonnes clés.
+            if self.long_term_memory.memory_keys.numel() > 0 : # Check if memory has keys
+                # Note: DifferentiableMemory.memory_keys might be [mem_size, key_size]
+                # queries are [batch, seq, key_size]
+                # We need to handle batch dimension for _calculate_novelty_score
+                # For simplicity, average queries over seq_len for novelty score calculation for LTM update decision
+                avg_queries_for_ltm_novelty = queries.mean(dim=1, keepdim=True)
+                novelty_for_ltm = self._calculate_novelty_score(avg_queries_for_ltm_novelty, self.long_term_memory.memory_keys)
+                if novelty_for_ltm > self.novelty_threshold_ltm:
+                    update_ltm_flag = True
+            else: # LTM est vide, donc tout est nouveau
+                update_ltm_flag = True
+
+            # Nouveauté pour la mémoire persistante (PM)
+            # VectorMemoryStore a self.memory_keys
+            if self.persistent_memory.memory_keys.numel() > 0 and self.persistent_memory.active_entries > 0:
+                avg_queries_for_pm_novelty = queries.mean(dim=1, keepdim=True) # Ou utiliser la sortie de LTM comme source
+                novelty_for_pm = self._calculate_novelty_score(avg_queries_for_pm_novelty, self.persistent_memory.memory_keys[:self.persistent_memory.active_entries])
+                if novelty_for_pm > self.novelty_threshold_pm:
+                    update_pm_flag = True
+            else: # PM est vide, donc tout est nouveau (si on décide de la mettre à jour)
+                update_pm_flag = True
+        
+        # Lire à partir de chaque niveau de mémoire
+        # La mise à jour de la mémoire à court terme est généralement plus fréquente
+        short_term_output = self.short_term_memory(queries, update_memory=update_mem_base_flag)
+        
+        long_term_output = self.long_term_memory(queries, update_memory=update_ltm_flag)
+        
+        # Pour la mémoire persistante, nous passons les 'queries' originelles.
+        # Une alternative serait de passer 'long_term_output' si la consolidation est strictement hiérarchique.
+        # Pour l'instant, utilisons 'queries' pour la PM également.
+        persistent_output = self.persistent_memory(queries, update_memory=update_pm_flag)
         
         # Appliquer l'effet d'oubli aux mémoires à long terme et persistante
-        if update_mem and forgetting_factor < 1.0:
+        # L'oubli devrait probablement s'appliquer indépendamment du fait que de nouvelles données soient écrites ou non.
+        # Et peut-être seulement si update_memory (le flag général) était True.
+        if update_memory and forgetting_factor < 1.0: # Check general update_memory flag
             with torch.no_grad():
                 if hasattr(self.long_term_memory, 'memory_values'):
                     self.long_term_memory.memory_values *= forgetting_factor
                 if hasattr(self.persistent_memory, 'memory_values'):
                     self.persistent_memory.memory_values *= forgetting_factor
         
-        # Déterminer l'importance de chaque niveau de mémoire
-        # Optimisation: calculer sur un échantillon réduit de la séquence pour les longues séquences
-        if seq_len > 128:
-            # Réduire la charge de calcul en prenant des moyennes sur des sous-sections
-            num_sections = min(32, seq_len)
-            section_size = seq_len // num_sections
-            section_queries = [queries[:, i*section_size:(i+1)*section_size].mean(dim=1) for i in range(num_sections)]
-            section_query = torch.stack(section_queries, dim=1).mean(dim=1)
-            memory_weights = self.memory_gate(section_query).unsqueeze(1)  # [batch, 1, 3]
-        else:
-            memory_weights = self.memory_gate(queries.mean(dim=1)).unsqueeze(1)  # [batch, 1, 3]
+        # Déterminer l'importance de chaque niveau de mémoire par token
+        # Appliquer self.memory_gate directement sur les queries [batch_size, seq_len, hidden_size]
+        # Résultat attendu pour memory_weights : [batch_size, seq_len, 3]
+        memory_weights = self.memory_gate(queries)
         
-        # Combiner les sorties de mémoire selon leur importance
+        # Combiner les sorties de mémoire selon leur importance (par token)
+        # short_term_output, long_term_output, persistent_output sont [batch, seq_len, hidden_size]
+        # memory_weights[:, :, 0:1] est [batch, seq_len, 1]
+        # L'opération * effectuera un broadcasting correct.
         combined_memory = (
-            memory_weights[:, :, 0:1] * short_term_output +
-            memory_weights[:, :, 1:2] * long_term_output +
-            memory_weights[:, :, 2:3] * persistent_output
+            memory_weights[..., 0:1] * short_term_output +  # Utiliser ... pour plus de généralité
+            memory_weights[..., 1:2] * long_term_output +
+            memory_weights[..., 2:3] * persistent_output
         )
         
         # Intégrer la mémoire combinée aux états cachés via attention

@@ -51,6 +51,12 @@ class NeuroLiteConfig:
     
     # Configuration de séquence
     max_seq_length: int = 512
+
+    # Configuration de l'adaptateur d'apprentissage continu
+    use_continual_adapter: bool = False
+    continual_adapter_buffer_size: int = 100
+    continual_adapter_rate: float = 0.1
+    continual_adapter_drift_threshold: float = 0.5
     
     # Configuration quantification
     quantization: Optional[Dict[str, Any]] = None
