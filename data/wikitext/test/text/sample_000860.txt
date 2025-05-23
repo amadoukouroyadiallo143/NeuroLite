@@ -1,1 +1,0 @@
- The presented plots of image impedance , attenuation and phase change correspond to a low @-@ pass prototype filter section . The prototype has a cut @-@ off frequency of ωc 
