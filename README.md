@@ -21,19 +21,25 @@ NeuroLite combine plusieurs innovations récentes en une architecture hybride l�
 
 ![Architecture NeuroLite](https://placeholder-for-architecture-diagram.com/neurolite_arch.png)
 
-1. **Projection d'entrée efficace** - Remplace les lourdes tables d'embedding par un encodage léger basé sur MinHash et filtres de Bloom (~99% de réduction de paramètres)
-2. **Backbone All-MLP** - Couches MLP-Mixer ou HyperMixer pour un traitement de séquence avec complexité temporelle et spatiale linéaire
-3. **Mémoire externe différentiable** - Système de mémoire associative à plusieurs niveaux pour la rétention contextuelle
-4. **Composants Neurosymboliques Avancés**:
+1.  **Projection d'Entrée Efficace et Multimodale**:
+    *   **Texte**: Remplace les lourdes tables d'embedding par un encodage léger basé sur MinHash et filtres de Bloom (~99% de réduction de paramètres) pour les entrées textuelles.
+    *   **Multimodal (`MultimodalProjection`)**: Lorsque `config.use_multimodal_input` est activé, ce module prend en charge les entrées de texte, image, audio et vidéo.
+        *   **Texte**: Traité comme ci-dessus.
+        *   **Image**: Encodée via un réseau convolutionnel léger inspiré des ViT minimalistes (traitement par patchs).
+        *   **Audio**: Encodé via des convolutions sur des features spectrales (ex: Mel-spectrogrammes).
+        *   **Vidéo**: Traitée par échantillonnage de trames (`config.multimodal_video_num_sampled_frames`), chaque trame étant encodée (par défaut via le même processeur que les images), puis les représentations de trames sont agrégées (ex: par moyennage).
+    *   Les représentations de chaque modalité sont ensuite fusionnées (par défaut via un mécanisme de pondération adaptative) en un vecteur unique. Ce vecteur est ensuite traité comme une séquence de longueur 1 par les couches suivantes du modèle.
+2.  **Backbone All-MLP** - Couches MLP-Mixer ou HyperMixer pour un traitement de séquence avec complexité temporelle et spatiale linéaire.
+3.  **Mémoire Externe Hiérarchique (`HierarchicalMemory`)**: Système de mémoire associative à plusieurs niveaux (court, long, persistant) pour la rétention contextuelle, avec des mécanismes de consolidation intelligente basés sur la nouveauté et des portes contextuelles pour la récupération.
+4.  **Composants Neurosymboliques Avancés**:
     - **Moteur de Règles Symboliques (`SymbolicRuleEngine`)**: Un moteur d'inférence léger qui charge des règles (logique de premier ordre) et des faits à partir de fichiers JSON. Il supporte l'ajout dynamique de faits, l'inférence vers l'avant (forward chaining) et la gestion de la négation dans les prémisses des règles.
     - **Couche Neurosymbolique (`NeuralSymbolicLayer`)**: Intègre le `SymbolicRuleEngine` dans le pipeline neuronal. Cette couche peut extraire des entités et relations potentielles des états cachés du modèle, les affirmer comme faits transitoires au moteur de règles, initier une phase d'inférence, puis réintégrer les faits dérivés dans les représentations neuronales. Elle supporte le traitement par batch et utilise des embeddings apprenables pour les types de prédicats et les identifiants d'entités symboliques, permettant au modèle d'apprendre à interpréter et utiliser les résultats du raisonnement symbolique. Le fichier `rules.json` (configurable via `symbolic_rules_file` dans `NeuroLiteConfig`) est utilisé pour charger les règles et faits persistants.
     - **Réseau Bayésien (`BayesianBeliefNetwork`)**: Permet d'intégrer des connaissances probabilistes et d'effectuer du raisonnement incertain. La structure du réseau (variables et leurs dépendances) peut être définie via la configuration (`bayesian_network_structure` et `num_bayesian_variables` dans `NeuroLiteConfig`). Le module utilise un algorithme d'inférence approximative (basé sur le Likelihood Weighting) pour estimer les probabilités postérieures étant donné des évidences extraites des états neuronaux.
 5. **Routage dynamique** - Activation conditionnelle de sous-modules spécialisés via Mixture-of-Experts léger
 6. **Apprentissage Continu et Mémoire Évoluée**:
     - **Adaptateur d'Apprentissage Continu (`ContinualAdapter`)**: Intégré au modèle, ce module vise à permettre l'apprentissage à partir de nouvelles données au fil du temps tout en atténuant l'oubli catastrophique des connaissances antérieures. Il utilise des mécanismes comme un tampon de rejeu (`replay buffer`) pour stocker des expériences passées, une détection conceptuelle de dérive de distribution (`drift detection`), et des stratégies d'adaptation du modèle. Voir `examples/lifelong_learning_demo.py`.
-    - **Mémoire Hiérarchique Améliorée (`HierarchicalMemory`)**: La mémoire hiérarchique a été dotée de capacités plus dynamiques :
-        - **Consolidation Intelligente**: Le transfert d'informations entre les niveaux de mémoire (court terme, long terme, persistant) est désormais modulé par la nouveauté des données. Les informations nouvelles et surprenantes sont priorisées pour la consolidation dans les mémoires à plus long terme, rendant les mises à jour plus sélectives et efficaces. Ceci est contrôlé par `novelty_threshold_ltm` et `novelty_threshold_pm`.
-        - **Portes Contextuelles de Mémoire**: La contribution de chaque niveau de mémoire (STM, LTM, PM) à la sortie finale est déterminée dynamiquement pour chaque token d'entrée, grâce à des poids calculés par `memory_gate` sur les requêtes. Cela permet une récupération d'informations contextuelles plus nuancée et pertinente.
+    - **Mémoire Hiérarchique Améliorée (déplacé au point 3)**
+7.  **Attention Cross-Modale (`CrossModalAttention`)**: Un module optionnel (`config.use_cross_modal_attention`) qui permet au modèle de fusionner les informations entre différentes modalités à un niveau plus profond. Par exemple, les représentations textuelles peuvent "prêter attention" aux caractéristiques d'une image pour enrichir la compréhension globale. Ce module est appliqué après les premières couches de traitement.
 
 ## 🧠 Fondements Théoriques
 
@@ -46,6 +52,7 @@ NeuroLite s'inspire de plusieurs avancées théoriques récentes:
 - **Composants Neurosymboliques (étendus)**: Combine traitement neuronal avec des mécanismes de raisonnement symbolique et probabiliste plus explicites pour améliorer les capacités de raisonnement structuré et la gestion de l'incertitude, tout en maintenant une faible empreinte paramétrique.
 - **Apprentissage Continu (Lifelong Learning)**: S'inspire des approches visant à permettre aux modèles d'apprendre séquentiellement de nouvelles tâches ou données sans oublier les précédentes, en utilisant des tampons de rejeu et des mécanismes d'adaptation.
 - **Mémoires Hiérarchiques Dynamiques**: Les améliorations apportées à la mémoire s'inspirent des modèles cognitifs de la mémoire humaine, où la consolidation et la récupération sont des processus dynamiques et dépendants du contexte et de la nouveauté.
+- **Traitement Multimodal et Fusion d'Informations**: Intègre des techniques pour encoder et fusionner des données provenant de diverses sources (texte, image, audio, vidéo), et pour permettre des interactions riches entre ces modalités via des mécanismes comme l'attention cross-modale.
 
 ## 📦 Structure du Projet
 
@@ -60,7 +67,8 @@ neurolite/
 ├── hierarchical_memory.py # Mémoire hiérarchique améliorée
 ├── routing.py         # Routage dynamique et Mixture-of-Experts
 ├── symbolic.py        # Composants de raisonnement symbolique (moteur de règles, couche neurosymbolique, BBN)
-└── continual.py       # Adaptateur d'apprentissage continu
+├── continual.py       # Adaptateur d'apprentissage continu
+└── multimodal.py      # Modules pour la projection et l'attention multimodales
 
 training/
 ├── data_manager.py    # Gestion des données d'entraînement et validation
@@ -80,6 +88,7 @@ examples/
 ├── symbolic_reasoning_example.py # Démonstration du moteur de règles et couche neurosymbolique
 ├── bayesian_network_example.py   # Démonstration du réseau bayésien
 ├── lifelong_learning_demo.py     # Démonstration de l'apprentissage continu avec l'adaptateur et la mémoire hiérarchique
+├── multimodal_input_example.py   # Démonstration de l'utilisation d'entrées multimodales
 └── benchmark_comparison.py     # Comparaison avec architectures standards
 
 generate_text.py     # Utilitaire de génération de texte avec modèle entraîné
@@ -144,7 +153,55 @@ model = NeuroLiteModel(config)
 model(input_texts=["Alice est une ingénieure vivant à Paris."], update_memory=True)
 
 # La requête suivante sera enrichie par le contexte en mémoire
-result = model(input_texts=["Où habite-t-elle ?"])
+result = model(multimodal_inputs={"text": ["Où habite-t-elle ?"]}) # Ajusté pour multimodal_inputs
+```
+
+### Traitement d'Entrées Multimodales
+
+```python
+from neurolite import NeuroLiteModel, NeuroLiteConfig
+import torch # Pour les tenseurs d'image/audio/vidéo
+
+# Configurer pour l'entrée multimodale
+config = NeuroLiteConfig.tiny()
+config.use_multimodal_input = True
+config.multimodal_output_dim = config.hidden_size # ou une autre valeur
+config.multimodal_image_patch_size = 16
+config.multimodal_video_num_sampled_frames = 3
+
+# Optionnel: activer l'attention cross-modale
+config.use_cross_modal_attention = True
+config.cross_modal_num_heads = 2
+
+model = NeuroLiteModel(config)
+model.eval()
+
+# Préparer les données (exemples avec des tenseurs aléatoires)
+batch_size = 2
+dummy_texts = ["Un chat sur un tapis.", "Une image d'un cosmos."]
+dummy_images = torch.randn(batch_size, 3, 224, 224) # B, C, H, W
+dummy_audio = torch.randn(batch_size, 1, 128, 80)   # B, C, T, F (spectrogramme)
+dummy_video = torch.randn(batch_size, 5, 3, 224, 224) # B, F, C, H, W
+
+multimodal_data = {
+    "text": dummy_texts,
+    "image": dummy_images,
+    "audio": dummy_audio,
+    "video": dummy_video
+}
+
+# Inférence (le modèle attend un dictionnaire via `multimodal_inputs`)
+# La sortie de MultimodalProjection est un vecteur unique par item de batch,
+# qui est ensuite traité comme une séquence de longueur 1.
+outputs = model(multimodal_inputs=multimodal_data, return_dict=True)
+fused_representation = outputs["hidden_states"] # Shape: [batch_size, 1, hidden_size]
+
+# Si use_cross_modal_attention est True et return_dict est True,
+# les représentations individuelles peuvent aussi être accessibles:
+if config.use_cross_modal_attention and "individual_modality_representations" in outputs:
+    individual_reprs = outputs["individual_modality_representations"]
+    # print("Représentation textuelle:", individual_reprs.get("text"))
+    # print("Représentation image:", individual_reprs.get("image"))
 ```
 
 ## 🏋️ Entraînement du Modèle
@@ -251,7 +308,15 @@ config = NeuroLiteConfig(
 
     # Configuration des seuils de nouveauté pour HierarchicalMemory
     novelty_threshold_ltm=0.6, # Seuil pour la mise à jour de la mémoire à long terme
-    novelty_threshold_pm=0.7   # Seuil pour la mise à jour de la mémoire persistante
+    novelty_threshold_pm=0.7,  # Seuil pour la mise à jour de la mémoire persistante
+
+    # Configuration pour l'entrée et l'attention multimodales
+    use_multimodal_input=True,
+    multimodal_output_dim=config.hidden_size, # Dimension de sortie de MultimodalProjection
+    multimodal_image_patch_size=16,
+    multimodal_video_num_sampled_frames=5,
+    use_cross_modal_attention=True,
+    cross_modal_num_heads=4
 )
 ```
 

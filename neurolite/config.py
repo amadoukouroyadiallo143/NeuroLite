@@ -57,6 +57,13 @@ class NeuroLiteConfig:
     continual_adapter_buffer_size: int = 100
     continual_adapter_rate: float = 0.1
     continual_adapter_drift_threshold: float = 0.5
+
+    # Configuration pour l'entrée multimodale
+    use_multimodal_input: bool = False
+    multimodal_output_dim: int = 0 # Si 0, utilise hidden_size. Sinon, cette dimension spécifique.
+    multimodal_image_patch_size: int = 16
+    multimodal_video_num_sampled_frames: int = 5
+    # minhash_permutations et bloom_filter_size sont déjà présents pour le texte
     
     # Configuration quantification
     quantization: Optional[Dict[str, Any]] = None

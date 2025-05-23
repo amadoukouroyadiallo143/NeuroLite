@@ -23,11 +23,13 @@ class MultimodalProjection(nn.Module):
         minhash_permutations: int,
         bloom_filter_size: int,
         image_patch_size: int = 16,
+        video_num_sampled_frames: int = 5, # New parameter for video
         dropout_rate: float = 0.1
     ):
         super().__init__()
         
         self.output_dim = output_dim
+        self.video_num_sampled_frames = video_num_sampled_frames
         
         # Projecteur pour le texte basé sur MinHash et Bloom
         self.text_encoder = MinHashBloomProjection(
@@ -64,74 +66,157 @@ class MultimodalProjection(nn.Module):
             nn.LayerNorm(output_dim),
             nn.Dropout(dropout_rate)
         )
+
+        # Encodeur pour les frames vidéo individuelles
+        # Re-utilise une architecture similaire à image_encoder.
+        # Si les frames vidéo ont des dimensions standard différentes (ex: 112x112 au lieu de 224x224),
+        # les dimensions de LayerNorm et Linear devront être ajustées.
+        # Pour cet exemple, on suppose que les frames vidéo sont traitées comme des images.
+        # Si image_patch_size est 16:
+        # Pour 224x224 -> 14x14 patches. 16*14*14 = 3136
+        # Pour 112x112 -> 7x7 patches.   16*7*7 = 784
+        # Let's assume video frames might be smaller, e.g., 112x112, leading to 7x7 patches.
+        # We will define a separate video_frame_processor for clarity,
+        # but it could share layers or be identical to image_encoder if frames are same size.
         
-        # Fusion adaptative des modalités
-        self.fusion_weights = nn.Parameter(torch.ones(3) / 3.0)  # Égalité par défaut
+        # Assuming video frames are, for example, 112x112, patch_size=16 -> 7x7 patches
+        # Conv2d(3, 16, kernel_size=16, stride=16) -> [B, 16, 7, 7]
+        # LayerNorm([16, 7, 7])
+        # Flatten(1) -> [B, 16*7*7 = 784]
+        # Linear(784, output_dim)
+        # This structure is illustrative. For simplicity, we can make it identical to image_encoder
+        # and assume input frames will be resized to what image_encoder expects (e.g. 224x224).
+        # Or, make it configurable. For now, let's use a distinct path but similar structure.
+        # For this task, we'll keep it simple and assume video frames can be processed by a similar architecture
+        # to the image_encoder. For robustness, let's use the same image_encoder for frames.
+        self.video_frame_processor = self.image_encoder 
+        # Note: If video frames have significantly different characteristics or typical resolutions than standalone images,
+        # a dedicated architecture for video_frame_processor would be better. Reusing image_encoder implies
+        # video frames are treated like individual images of the same expected input size.
+
+        # Frame Aggregation: Using mean pooling, so no specific nn.Module needed here,
+        # it will be done in the forward pass. If using Linear/RNN, it would be defined here.
+        
+        # Fusion adaptative des modalités (maintenant 4 modalités)
+        self.fusion_weights = nn.Parameter(torch.ones(4) / 4.0)  # Texte, Image, Audio, Vidéo
         self.fusion_gate = nn.Sequential(
-            nn.Linear(output_dim * 3, 3),
+            nn.Linear(output_dim * 4, 4), # Input_dim * 4
             nn.Softmax(dim=-1)
         )
     
-    def forward(self, inputs: Dict[str, Union[List[str], torch.Tensor]]) -> torch.Tensor:
+    def forward(self, 
+                inputs: Dict[str, Union[List[str], torch.Tensor, None]], 
+                return_individual_modalities: bool = False
+               ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Traite des entrées multimodales et produit une représentation commune.
         
         Args:
-            inputs: Dictionnaire avec les clés 'text', 'image', 'audio'
-                   contenant les données pour chaque modalité
+            inputs: Dictionnaire avec les clés 'text', 'image', 'audio', 'video'
+                    contenant les données pour chaque modalité.
+            return_individual_modalities: Si True, retourne aussi un dictionnaire
+                                           des représentations de chaque modalité.
                    
         Returns:
-            Tensor de représentations [batch_size, output_dim]
+            - Si return_individual_modalities est False: Tensor de représentations fusionnées [batch_size, output_dim]
+            - Si return_individual_modalities est True: Tuple (fused_representation, individual_representations_dict)
         """
         batch_size = self._get_batch_size(inputs)
         device = self._get_device(inputs)
         
-        # Initialiser les représentations par modalité (tenseurs nuls si non présents)
+        individual_representations: Dict[str, torch.Tensor] = {}
+        
+        
+        # Initialiser les représentations par modalité
+        # Utiliser des tenseurs nuls par défaut et les remplacer si la modalité est présente
         text_repr = torch.zeros((batch_size, self.output_dim), device=device)
         image_repr = torch.zeros((batch_size, self.output_dim), device=device)
         audio_repr = torch.zeros((batch_size, self.output_dim), device=device)
+        video_repr = torch.zeros((batch_size, self.output_dim), device=device)
         
         # Encoder chaque modalité si présente
-        if "text" in inputs and inputs["text"]:
+        if "text" in inputs and inputs["text"] is not None and len(inputs["text"]) > 0:
             text_repr = self.text_encoder(inputs["text"])
+            if torch.any(text_repr != 0): individual_representations["text"] = text_repr
             
         if "image" in inputs and inputs["image"] is not None:
             image_repr = self.image_encoder(inputs["image"])
+            if torch.any(image_repr != 0): individual_representations["image"] = image_repr
             
         if "audio" in inputs and inputs["audio"] is not None:
             audio_repr = self.audio_encoder(inputs["audio"])
+            if torch.any(audio_repr != 0): individual_representations["audio"] = audio_repr
+
+        if "video" in inputs and inputs["video"] is not None:
+            video_input = inputs["video"] 
+            num_total_frames = video_input.size(1)
+            sampled_frames = None # Initialize to avoid potential reference before assignment
+
+            if num_total_frames == 0:
+                 pass 
+            elif num_total_frames <= self.video_num_sampled_frames:
+                sampled_frames = video_input
+            else:
+                indices = torch.linspace(0, num_total_frames - 1, self.video_num_sampled_frames, device=device).long()
+                sampled_frames = video_input.index_select(1, indices)
+
+            if sampled_frames is not None and sampled_frames.numel() > 0 :
+                b, n_sampled, c, h, w = sampled_frames.shape
+                frames_reshaped = sampled_frames.reshape(b * n_sampled, c, h, w)
+                frame_features = self.video_frame_processor(frames_reshaped)
+                frame_features_orig_shape = frame_features.view(b, n_sampled, self.output_dim)
+                video_repr = frame_features_orig_shape.mean(dim=1)
+                if torch.any(video_repr != 0): individual_representations["video"] = video_repr
         
         # Fusion adaptative par gate mechanism
-        combined_repr = torch.cat([text_repr, image_repr, audio_repr], dim=-1)
-        fusion_weights = self.fusion_gate(combined_repr)
+        # Utiliser les représentations calculées (qui peuvent être zéro si la modalité est absente)
+        combined_input_for_gate = torch.cat([text_repr, image_repr, audio_repr, video_repr], dim=-1)
+        fusion_weights = self.fusion_gate(combined_input_for_gate) 
         
-        # Calculer une somme pondérée des représentations
         fused_repr = (
-            fusion_weights[:, 0:1] * text_repr +
-            fusion_weights[:, 1:2] * image_repr +
-            fusion_weights[:, 2:3] * audio_repr
+            fusion_weights[..., 0:1] * text_repr +
+            fusion_weights[..., 1:2] * image_repr +
+            fusion_weights[..., 2:3] * audio_repr +
+            fusion_weights[..., 3:4] * video_repr
         )
         
-        return fused_repr
+        if return_individual_modalities:
+            return fused_repr, individual_representations
+        else:
+            return fused_repr
     
-    def _get_batch_size(self, inputs: Dict[str, Union[List[str], torch.Tensor]]) -> int:
+    def _get_batch_size(self, inputs: Dict[str, Union[List[str], torch.Tensor, None]]) -> int:
         """Détermine la taille du batch à partir des entrées"""
-        if "text" in inputs and inputs["text"]:
+        if "text" in inputs and inputs["text"] is not None and len(inputs["text"]) > 0:
             return len(inputs["text"])
         elif "image" in inputs and inputs["image"] is not None:
             return inputs["image"].size(0)
         elif "audio" in inputs and inputs["audio"] is not None:
             return inputs["audio"].size(0)
+        elif "video" in inputs and inputs["video"] is not None: # Added video check
+            return inputs["video"].size(0)
         else:
-            return 1  # Par défaut
+            # Attempt to find a valid input to infer batch size if primary ones are missing
+            for key in inputs:
+                if isinstance(inputs[key], torch.Tensor) and inputs[key] is not None:
+                    return inputs[key].size(0)
+                elif isinstance(inputs[key], list) and len(inputs[key]) > 0:
+                    return len(inputs[key])
+            return 1  # Par défaut if no valid input found
             
-    def _get_device(self, inputs: Dict[str, Union[List[str], torch.Tensor]]) -> torch.device:
+    def _get_device(self, inputs: Dict[str, Union[List[str], torch.Tensor, None]]) -> torch.device:
         """Détermine le device des tenseurs d'entrée"""
         if "image" in inputs and inputs["image"] is not None:
             return inputs["image"].device
         elif "audio" in inputs and inputs["audio"] is not None:
             return inputs["audio"].device
+        elif "video" in inputs and inputs["video"] is not None: # Added video check
+            return inputs["video"].device
         else:
+            # Attempt to find a valid tensor input to infer device
+            for key in inputs:
+                if isinstance(inputs[key], torch.Tensor) and inputs[key] is not None:
+                    return inputs[key].device
             return torch.device("cpu")  # Par défaut
 
 
