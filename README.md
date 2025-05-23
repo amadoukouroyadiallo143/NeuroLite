@@ -70,17 +70,6 @@ neurolite/
 ├── continual.py       # Adaptateur d'apprentissage continu
 └── multimodal.py      # Modules pour la projection et l'attention multimodales
 
-training/
-├── data_manager.py    # Gestion des données d'entraînement et validation
-├── train_generator.py # Script d'entraînement du modèle de génération
-└── train_classifier.py # Script d'entraînement du classifieur
-
-data/
-└── wikitext/         # Données d'entraînement provenant du corpus WikiText
-    ├── train/        # Données d'entraînement
-    ├── val/          # Données de validation
-    └── test/         # Données de test
-
 examples/
 ├── simple_example.py           # Exemple basique d'utilisation
 ├── classification_example.py   # Classification de texte
@@ -91,7 +80,6 @@ examples/
 ├── multimodal_input_example.py   # Démonstration de l'utilisation d'entrées multimodales
 └── benchmark_comparison.py     # Comparaison avec architectures standards
 
-generate_text.py     # Utilitaire de génération de texte avec modèle entraîné
 neurolite_demo.py    # Application de démonstration interactive
 ```
 
@@ -228,11 +216,6 @@ Pour entraîner sur un matériel limité, utilisez des paramètres plus légers 
 python training/train_generator.py --data_dir "data/wikitext" --batch_size 8 --seq_length 128 --hidden_size 128 --num_layers 4 --num_epochs 5 --max_samples 1000
 ```
 
-Une fois entraîné, générez du texte avec le modèle :
-
-```bash
-python generate_text.py --model_path "models/generator_ep20.pt" --prompt "NeuroLite est" --max_length 100
-```
 
 ## 🧪 Exemples et Démonstration
 
