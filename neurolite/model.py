@@ -43,23 +43,37 @@ class NeuroLiteModel(nn.Module):
         self.num_labels = num_labels
         self.tokenizer = tokenizer
         
-        # Couche de projection d'entrée (remplace les embeddings traditionnels)
-        if config.input_projection_type == "minhash_bloom":
-            self.input_projection = MinHashBloomProjection(
-                output_dim=config.hidden_size,
+        # Couche de projection d'entrée
+        self.multimodal_to_hidden_proj = None
+        if getattr(config, 'use_multimodal_input', False):
+            multimodal_proj_output_dim = config.multimodal_output_dim if config.multimodal_output_dim > 0 else config.hidden_size
+            self.input_projection = MultimodalProjection(
+                output_dim=multimodal_proj_output_dim,
                 minhash_permutations=config.minhash_num_permutations,
                 bloom_filter_size=config.bloom_filter_size,
+                image_patch_size=config.multimodal_image_patch_size,
+                video_num_sampled_frames=config.multimodal_video_num_sampled_frames,
                 dropout_rate=config.dropout_rate
             )
+            if multimodal_proj_output_dim != config.hidden_size:
+                self.multimodal_to_hidden_proj = nn.Linear(multimodal_proj_output_dim, config.hidden_size)
         else:
-            # Version tokenisée pour travailler avec des indices de tokens
-            self.input_projection = TokenizedMinHashProjection(
-                output_dim=config.hidden_size,
-                minhash_permutations=config.minhash_num_permutations,
-                bloom_filter_size=config.bloom_filter_size,
-                vocab_size=config.vocab_size,
-                dropout_rate=config.dropout_rate
-            )
+            # Original text-specific input projection
+            if config.input_projection_type == "minhash_bloom":
+                self.input_projection = MinHashBloomProjection(
+                    output_dim=config.hidden_size,
+                    minhash_permutations=config.minhash_num_permutations,
+                    bloom_filter_size=config.bloom_filter_size,
+                    dropout_rate=config.dropout_rate
+                )
+            else: # "ngram_hash" or tokenized
+                self.input_projection = TokenizedMinHashProjection(
+                    output_dim=config.hidden_size,
+                    minhash_permutations=config.minhash_num_permutations,
+                    bloom_filter_size=config.bloom_filter_size,
+                    vocab_size=config.vocab_size,
+                    dropout_rate=config.dropout_rate
+                )
             
         # Couches de traitement principales (MLP-Mixer ou variantes)
         self.layers = nn.ModuleList()
@@ -143,6 +157,18 @@ class NeuroLiteModel(nn.Module):
                 )
         else:
             self.symbolic = None
+
+        # Réseau Bayésien (optionnel)
+        if getattr(config, 'use_bayesian_module', False) and getattr(config, 'num_bayesian_variables', 0) > 0:
+            self.bayesian_network = BayesianBeliefNetwork(
+                config=config, # Pass the full config
+                hidden_size=config.hidden_size,
+                # num_variables is read from config inside BayesianBeliefNetwork
+                # max_parents is read from config inside BayesianBeliefNetwork
+                dropout_rate=config.dropout_rate
+            )
+        else:
+            self.bayesian_network = None
             
         # Module de planification (optionnel)
         if getattr(config, 'use_planning_module', False):
@@ -161,27 +187,56 @@ class NeuroLiteModel(nn.Module):
             eps=config.layer_norm_epsilon
         )
         
-        # Projection multimodale (optionnelle)
-        if getattr(config, 'use_multimodal', False):
-            self.input_projection = MultimodalProjection(
-                output_dim=config.hidden_size,
-                minhash_permutations=config.minhash_num_permutations,
-                bloom_filter_size=config.bloom_filter_size,
-                image_patch_size=getattr(config, 'image_patch_size', 16),
-                dropout_rate=config.dropout_rate
-            )
+        # Projection multimodale (optionnelle) - This block is now handled above by replacing self.input_projection
+        # if getattr(config, 'use_multimodal', False):
+        #     self.input_projection = MultimodalProjection(
+        #         output_dim=config.hidden_size,
+        #         minhash_permutations=config.minhash_num_permutations,
+        #         bloom_filter_size=config.bloom_filter_size,
+        #         image_patch_size=getattr(config, 'image_patch_size', 16), # This was the old name
+        #         dropout_rate=config.dropout_rate
+        #     )
         
         # Adaptateur d'apprentissage continu (optionnel)
-        if getattr(config, 'use_continual_learning', False):
+        if getattr(config, 'use_continual_adapter', False): # Changed config name
             self.continual_adapter = ContinualAdapter(
                 hidden_size=config.hidden_size,
-                buffer_size=getattr(config, 'replay_buffer_size', 100),
-                adaptation_rate=getattr(config, 'adaptation_rate', 0.1),
-                drift_threshold=getattr(config, 'drift_threshold', 0.5),
+                buffer_size=getattr(config, 'continual_adapter_buffer_size', 100), # Changed config name
+                adaptation_rate=getattr(config, 'continual_adapter_rate', 0.1), # Changed config name
+                drift_threshold=getattr(config, 'continual_adapter_drift_threshold', 0.5), # Changed config name
                 dropout_rate=config.dropout_rate
             )
         else:
             self.continual_adapter = None
+
+        # Attention Cross-Modale (optionnelle)
+        self.cross_modal_attention_text_image = None
+        self.project_text_for_cm_attn = None # Projection for text features before CM
+        self.project_image_for_cm_attn = None # Projection for image features before CM
+
+        if getattr(config, 'use_multimodal_input', False) and \
+           getattr(config, 'use_cross_modal_attention', False):
+            
+            # CrossModalAttention will operate on features of config.hidden_size
+            cm_interaction_dim = config.hidden_size 
+            
+            self.cross_modal_attention_text_image = CrossModalAttention(
+                hidden_size=cm_interaction_dim,
+                num_heads=config.cross_modal_num_heads, # This should be from config
+                dropout_rate=config.dropout_rate
+            )
+            
+            # Determine if individual modality features need projection to cm_interaction_dim
+            # This is the output dimension of MultimodalProjection's individual modality features
+            multimodal_proj_individual_feature_dim = config.multimodal_output_dim if config.multimodal_output_dim > 0 else config.hidden_size
+            
+            if multimodal_proj_individual_feature_dim != cm_interaction_dim:
+                # These projections will be used if individual modality features (e.g., text, image)
+                # from MultimodalProjection are not already of cm_interaction_dim (hidden_size).
+                self.project_text_for_cm_attn = nn.Linear(multimodal_proj_individual_feature_dim, cm_interaction_dim)
+                self.project_image_for_cm_attn = nn.Linear(multimodal_proj_individual_feature_dim, cm_interaction_dim)
+            # If multimodal_proj_individual_feature_dim is already cm_interaction_dim (i.e., hidden_size),
+            # then these projection layers will remain None, and original features will be used directly.
             
         # Couches de sortie spécifiques selon le type de tâche
         if task_type == "classification" and num_labels is not None:
@@ -244,13 +299,14 @@ class NeuroLiteModel(nn.Module):
     
     def forward(
         self,
-        input_texts: Optional[List[str]] = None,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        # input_texts: Optional[List[str]] = None, # Removed
+        # input_ids: Optional[torch.Tensor] = None, # Removed
+        multimodal_inputs: Optional[Dict[str, Union[List[str], torch.Tensor, None]]] = None,
+        attention_mask: Optional[torch.Tensor] = None, # Still potentially useful for text if part of multimodal_inputs
         labels: Optional[torch.Tensor] = None,
         update_memory: bool = True,
         output_hidden_states: bool = False,
-        multimodal_inputs: Optional[Dict[str, torch.Tensor]] = None,
+        # multimodal_inputs: Optional[Dict[str, torch.Tensor]] = None, # This was the old signature, updated above
         external_facts: Optional[torch.Tensor] = None,
         use_planning: bool = False,
         constraints: Optional[torch.Tensor] = None,
@@ -262,47 +318,108 @@ class NeuroLiteModel(nn.Module):
         Passage avant dans le modèle NeuroLite.
         
         Args:
-            input_texts: Liste de textes d'entrée (si utilisation de MinHashBloomProjection)
-            input_ids: Tensor d'indices de tokens (si utilisation de TokenizedMinHashProjection)
-            attention_mask: Masque d'attention (optionnel)
-            update_memory: Si True, met à jour la mémoire externe
-            output_hidden_states: Si True, retourne aussi les états intermédiaires
+            multimodal_inputs: Dictionnaire d'entrées multimodales.
+                               Ex: {'text': ["texte"], 'image': tensor_image, 'audio': tensor_audio, 'video': tensor_video}
+                               ou {'text': ["texte"]} ou {'input_ids': tensor_ids} pour le mode texte seul.
+            attention_mask: Masque d'attention (principalement pour input_ids si utilisé en mode texte seul).
+            update_memory: Si True, met à jour la mémoire externe et le buffer de l'adaptateur continu.
+            output_hidden_states: Si True, retourne aussi les états intermédiaires.
+            ... (autres args)
             
         Returns:
-            Tensor de sortie [batch_size, seq_length, hidden_size] ou
-            Tuple de (sortie, liste d'états cachés) si output_hidden_states=True
+            Dictionnaire de sorties ou tenseur/tuple selon return_dict et task_type.
         """
-        # Vérifier que l'entrée est valide
-        if input_texts is None and input_ids is None and multimodal_inputs is None:
-            raise ValueError("Vous devez fournir au moins un type d'entrée: 'input_texts', 'input_ids' ou 'multimodal_inputs'")
-            
-        if input_texts is not None and input_ids is not None:
-            raise ValueError("Veuillez fournir soit 'input_texts', soit 'input_ids', pas les deux")
         
-        # Traiter l'entrée selon son type
-        if input_texts is not None:
-            hidden_states = self._process_text_input(input_texts)
-        elif input_ids is not None:
-            hidden_states = self._process_token_input(input_ids, attention_mask)
-        elif multimodal_inputs is not None and hasattr(self.input_projection, 'process_multimodal'):
-            hidden_states = self.input_projection.process_multimodal(multimodal_inputs)
-        else:
-            raise ValueError("Vous devez fournir soit 'input_texts', 'input_ids' ou 'multimodal_inputs'")
-        
-        # Stocker les états cachés intermédiaires si demandé
+        if multimodal_inputs is None or not isinstance(multimodal_inputs, dict):
+            raise ValueError("`multimodal_inputs` doit être un dictionnaire fourni.")
+
         all_hidden_states = [] if output_hidden_states else None
+        individual_modality_representations = None # To store outputs from MultimodalProjection
+
+        if getattr(self.config, 'use_multimodal_input', False):
+            if not isinstance(self.input_projection, MultimodalProjection):
+                 raise TypeError("Modèle configuré pour entrée multimodale, mais self.input_projection n'est pas MultimodalProjection.")
+            
+            # Call MultimodalProjection and potentially get individual modality representations
+            if getattr(self.config, 'use_cross_modal_attention', False):
+                fused_proj, individual_modality_representations = self.input_projection(
+                    multimodal_inputs, 
+                    return_individual_modalities=True
+                )
+            else:
+                fused_proj = self.input_projection(
+                    multimodal_inputs, 
+                    return_individual_modalities=False
+                )
+            
+            hidden_states = fused_proj.unsqueeze(1) # [Batch, 1, multimodal_output_dim or hidden_size]
+            if self.multimodal_to_hidden_proj is not None:
+                hidden_states = self.multimodal_to_hidden_proj(hidden_states)
+        else:
+            # Mode texte seul: extraire input_texts ou input_ids de multimodal_inputs
+            input_texts = multimodal_inputs.get("text")
+            input_ids = multimodal_inputs.get("input_ids")
+            # attention_mask est déjà un argument de la fonction forward
+
+            if input_texts is not None and input_ids is not None:
+                 raise ValueError("En mode texte seul, fournir soit 'text', soit 'input_ids' dans `multimodal_inputs`, pas les deux.")
+            
+            if input_texts is not None:
+                if not isinstance(self.input_projection, MinHashBloomProjection):
+                    raise TypeError("Type de projection d'entrée ne correspond pas à MinHashBloomProjection pour input_texts.")
+                hidden_states = self._process_text_input(input_texts) # Attends une liste de textes
+            elif input_ids is not None:
+                if not isinstance(self.input_projection, TokenizedMinHashProjection):
+                    raise TypeError("Type de projection d'entrée ne correspond pas à TokenizedMinHashProjection pour input_ids.")
+                hidden_states = self._process_token_input(input_ids, attention_mask)
+            else:
+                raise ValueError("En mode texte seul, `multimodal_inputs` doit contenir 'text' (List[str]) ou 'input_ids' (Tensor).")
+
+        if output_hidden_states:
+            all_hidden_states.append(hidden_states.clone()) # Store initial projection
         
         # Initialiser les variables de sortie symboliques à None
         symbolic_outputs = None
         plan_outputs = None
         
-        # Apprentissage continu (adaptation aux nouvelles distributions)
-        if continuous_learning and hasattr(self, 'continual_adapter'):
-            hidden_states = self.continual_adapter(hidden_states, update_memory=update_memory)
-        
         # Passage à travers les couches principales
-        for layer in self.layers:
-            hidden_states = layer(hidden_states)
+        for i, layer_module in enumerate(self.layers): # Renamed 'layer' to 'layer_module' to avoid conflict
+            hidden_states = layer_module(hidden_states)
+            
+            # Apply Cross-Modal Attention (Example: after the first layer, i.e., i=0)
+            # This placement is conceptual. Optimal placement might vary.
+            if i == 0 and \
+               getattr(self.config, 'use_multimodal_input', False) and \
+               getattr(self.config, 'use_cross_modal_attention', False) and \
+               self.cross_modal_attention_text_image is not None and \
+               individual_modality_representations is not None:
+                
+                # Example: Current hidden_states (query) attends to image features (key/value)
+                # Ensure individual_modality_representations is a dict as expected
+                if isinstance(individual_modality_representations, dict):
+                    image_features_orig = individual_modality_representations.get('image') # [B, multimodal_proj_output_dim]
+                else: # Should not happen if MultimodalProjection is correct
+                    image_features_orig = None
+
+                if image_features_orig is not None:
+                    image_key_value_for_cm = image_features_orig
+                    if self.project_image_for_cm_attn: # If projection layer exists
+                        image_key_value_for_cm = self.project_image_for_cm_attn(image_key_value_for_cm) # [B, hidden_size]
+                    
+                    # Unsqueeze to [B, 1, hidden_size] to act as a sequence of length 1 for key/value
+                    image_key_value_seq = image_key_value_for_cm.unsqueeze(1) 
+                    
+                    if hidden_states.shape[1] > 0: # Ensure query sequence is not empty
+                        # Ensure attention_mask is compatible if needed by CrossModalAttention
+                        # Current CrossModalAttention takes a mask [B, SeqQuery, SeqKV]
+                        # For this example, with SeqKV=1, mask might be [B, SeqQuery, 1] or None
+                        cm_attention_mask = None # Or construct appropriately if needed
+                        
+                        hidden_states = self.cross_modal_attention_text_image(
+                           query_modality=hidden_states,       # [B, SeqLen, hidden_size]
+                           key_value_modality=image_key_value_seq, # [B, 1, hidden_size]
+                           attention_mask=cm_attention_mask
+                        )
             
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
@@ -329,16 +446,31 @@ class NeuroLiteModel(nn.Module):
             
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
+
+        # Intégration du Réseau Bayésien (si activé)
+        if self.bayesian_network is not None:
+            hidden_states = self.bayesian_network(hidden_states)
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
                 
         # Module de planification (si activé et requis)
         if self.planner is not None and use_planning:
-            if return_symbolic:
+            if return_symbolic: # This argument is 'return_symbolic', maybe should be 'return_plan_details'?
                 hidden_states, plan_outputs = self.planner(hidden_states, 
                                                          constraints=constraints,
                                                          return_plan=True)
             else:
                 hidden_states = self.planner(hidden_states, constraints=constraints)
                 
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+        # Adaptateur d'apprentissage continu (après les couches principales et autres modules)
+        # Renamed 'continuous_learning' parameter to 'use_continual_adapter_during_forward' for clarity
+        # Or, we can assume if self.continual_adapter exists, it's always used.
+        # The original forward param was `continuous_learning`. Let's assume it controls this.
+        if continuous_learning and self.continual_adapter is not None:
+            hidden_states = self.continual_adapter(hidden_states, update_memory=update_memory)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
         
@@ -397,11 +529,17 @@ class NeuroLiteModel(nn.Module):
         # Ajouter les états cachés et les sorties symboliques si demandé
         if output_hidden_states:
             outputs["all_hidden_states"] = all_hidden_states
-        if symbolic_outputs is not None and return_symbolic:
+        if symbolic_outputs is not None and return_symbolic: # from NeuroSymbolicReasoner
             outputs["symbolic_outputs"] = symbolic_outputs
-        if plan_outputs is not None and use_planning:
+        if plan_outputs is not None and use_planning: # from StructuredPlanner
             outputs["plan_outputs"] = plan_outputs
         
+        # Add individual modality representations to output if requested and available
+        if getattr(self.config, 'use_multimodal_input', False) and \
+           getattr(self.config, 'use_cross_modal_attention', False) and \
+           individual_modality_representations is not None and return_dict:
+            outputs["individual_modality_representations"] = individual_modality_representations
+            
         # Retourner les sorties dans le format approprié
         if not return_dict:
             if self.task_type == "base":

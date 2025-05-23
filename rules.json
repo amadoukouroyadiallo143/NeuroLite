@@ -1,0 +1,35 @@
+{
+    "facts": [
+        "estParentDe(jean, paul)",
+        "estParentDe(paul, marie)",
+        "estParentDe(alice, jacques)",
+        "estOiseau(titi)",
+        "peutVoler(titi)",
+        "estOiseau(pingu)",
+        "estMammifere(felix)",
+        "estChat(felix)",
+        "miaule(felix)"
+    ],
+    "rules": [
+        {
+            "premises": ["estParentDe(?x, ?y)", "estParentDe(?y, ?z)"],
+            "conclusion": "estGrandParentDe(?x, ?z)"
+        },
+        {
+            "premises": ["estOiseau(?x)", "NOT peutVoler(?x)"],
+            "conclusion": "estManchot(?x)"
+        },
+        {
+            "premises": ["estChat(?x)", "miaule(?x)"],
+            "conclusion": "estAnimalDomestiqueContent(?x)"
+        },
+        {
+            "premises": ["estMammifere(?x)"],
+            "conclusion": "respireAir(?x)"
+        },
+        {
+            "premises": ["estGrandParentDe(?gp, ?gc)", "estParentDe(?gp, ?p)"],
+            "conclusion": "oncleOuTantePossible(?p, ?gc)" 
+        }
+    ]
+}
