@@ -143,6 +143,18 @@ class NeuroLiteModel(nn.Module):
                 )
         else:
             self.symbolic = None
+
+        # Réseau Bayésien (optionnel)
+        if getattr(config, 'use_bayesian_module', False) and getattr(config, 'num_bayesian_variables', 0) > 0:
+            self.bayesian_network = BayesianBeliefNetwork(
+                config=config, # Pass the full config
+                hidden_size=config.hidden_size,
+                # num_variables is read from config inside BayesianBeliefNetwork
+                # max_parents is read from config inside BayesianBeliefNetwork
+                dropout_rate=config.dropout_rate
+            )
+        else:
+            self.bayesian_network = None
             
         # Module de planification (optionnel)
         if getattr(config, 'use_planning_module', False):
@@ -327,6 +339,12 @@ class NeuroLiteModel(nn.Module):
             else:
                 hidden_states = self.symbolic(hidden_states)
             
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+        # Intégration du Réseau Bayésien (si activé)
+        if self.bayesian_network is not None:
+            hidden_states = self.bayesian_network(hidden_states)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
                 

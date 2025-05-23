@@ -36,7 +36,14 @@ class NeuroLiteConfig:
     # Configuration module symbolique
     use_symbolic_module: bool = False
     symbolic_rules_file: Optional[str] = None
+    max_predicate_types: int = 50 # For NeuralSymbolicLayer's predicate vocab
+    max_entities_in_vocab: int = 200 # For NeuralSymbolicLayer's entity vocab
     
+    # Configuration Réseau Bayésien
+    use_bayesian_module: bool = False # To control adding BayesianBeliefNetwork in NeuroLiteModel
+    num_bayesian_variables: int = 10
+    bayesian_network_structure: Optional[List[Tuple[int, int]]] = None # List of (parent_idx, child_idx)
+
     # Configuration routage dynamique
     use_dynamic_routing: bool = True
     num_experts: int = 4
@@ -95,3 +102,16 @@ class NeuroLiteConfig:
             memory_dim=384,
             num_experts=6,
         )
+
+    @classmethod
+    def base_symbolic(cls) -> "NeuroLiteConfig":
+        """Configuration pour un modèle de base avec module symbolique activé."""
+        config = cls.base()
+        config.use_symbolic_module = True
+        config.symbolic_rules_file = "rules.json"  # Default rules file
+        # Add Bayesian module related defaults if base_symbolic should also use it
+        config.use_bayesian_module = True 
+        config.num_bayesian_variables = 10
+        # Example: A -> B, B -> C  (0->1, 1->2)
+        config.bayesian_network_structure = [(0,1), (1,2)] 
+        return config

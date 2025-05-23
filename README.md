@@ -24,7 +24,10 @@ NeuroLite combine plusieurs innovations récentes en une architecture hybride l�
 1. **Projection d'entrée efficace** - Remplace les lourdes tables d'embedding par un encodage léger basé sur MinHash et filtres de Bloom (~99% de réduction de paramètres)
 2. **Backbone All-MLP** - Couches MLP-Mixer ou HyperMixer pour un traitement de séquence avec complexité temporelle et spatiale linéaire
 3. **Mémoire externe différentiable** - Système de mémoire associative à plusieurs niveaux pour la rétention contextuelle
-4. **Module symbolique** - Composant de raisonnement structuré permettant d'intégrer des connaissances et règles explicites
+4. **Composants Neurosymboliques Avancés**:
+    - **Moteur de Règles Symboliques (`SymbolicRuleEngine`)**: Un moteur d'inférence léger qui charge des règles (logique de premier ordre) et des faits à partir de fichiers JSON. Il supporte l'ajout dynamique de faits, l'inférence vers l'avant (forward chaining) et la gestion de la négation dans les prémisses des règles.
+    - **Couche Neurosymbolique (`NeuralSymbolicLayer`)**: Intègre le `SymbolicRuleEngine` dans le pipeline neuronal. Cette couche peut extraire des entités et relations potentielles des états cachés du modèle, les affirmer comme faits transitoires au moteur de règles, initier une phase d'inférence, puis réintégrer les faits dérivés dans les représentations neuronales. Elle supporte le traitement par batch et utilise des embeddings apprenables pour les types de prédicats et les identifiants d'entités symboliques, permettant au modèle d'apprendre à interpréter et utiliser les résultats du raisonnement symbolique. Le fichier `rules.json` (configurable via `symbolic_rules_file` dans `NeuroLiteConfig`) est utilisé pour charger les règles et faits persistants.
+    - **Réseau Bayésien (`BayesianBeliefNetwork`)**: Permet d'intégrer des connaissances probabilistes et d'effectuer du raisonnement incertain. La structure du réseau (variables et leurs dépendances) peut être définie via la configuration (`bayesian_network_structure` et `num_bayesian_variables` dans `NeuroLiteConfig`). Le module utilise un algorithme d'inférence approximative (basé sur le Likelihood Weighting) pour estimer les probabilités postérieures étant donné des évidences extraites des états neuronaux.
 5. **Routage dynamique** - Activation conditionnelle de sous-modules spécialisés via Mixture-of-Experts léger
 
 ## 🧠 Fondements Théoriques
@@ -35,7 +38,7 @@ NeuroLite s'inspire de plusieurs avancées théoriques récentes:
 - **Complexité Linéaire**: Exploite les approches comme Performer, Linformer et FNet qui remplacent l'attention quadratique par des approximations efficaces
 - **Mémoire Associative Moderne**: Intègre des réseaux de Hopfield continus de grande capacité pour la mémorisation associative
 - **Routage Adaptatif**: Utilise des techniques de routage dynamique pour activer sélectivement différents "experts" selon le contexte
-- **Composants Neurosymboliques**: Combine traitement neuronal et symbolique pour améliorer les capacités de raisonnement avec peu de paramètres
+- **Composants Neurosymboliques (étendus)**: Combine traitement neuronal avec des mécanismes de raisonnement symbolique et probabiliste plus explicites pour améliorer les capacités de raisonnement structuré et la gestion de l'incertitude, tout en maintenant une faible empreinte paramétrique.
 
 ## 📦 Structure du Projet
 
@@ -202,14 +205,31 @@ config = NeuroLiteConfig.small()
 # Standard (~20-30Mo)
 config = NeuroLiteConfig.base()
 
+# Standard avec modules symboliques et bayésiens activés par défaut
+config = NeuroLiteConfig.base_symbolic()
+# Cela active `use_symbolic_module=True`, `symbolic_rules_file="rules.json"`,
+# `use_bayesian_module=True`, et définit une structure bayésienne d'exemple.
+
 # Personnalisation avancée
 config = NeuroLiteConfig(
     hidden_size=256,
     num_mixer_layers=6,
     use_external_memory=True,
     use_dynamic_routing=True,
+    num_experts=4,
+    
+    # Activation et configuration du module symbolique
     use_symbolic_module=True,
-    num_experts=4
+    symbolic_rules_file="custom_rules.json", # Chemin vers votre fichier de règles
+    max_predicate_types=100, # Taille du vocabulaire pour les types de prédicats
+    max_entities_in_vocab=500, # Taille du vocabulaire pour les entités symboliques
+
+    # Activation et configuration du réseau bayésien
+    use_bayesian_module=True,
+    num_bayesian_variables=15,
+    # Exemple: [(parent_idx, child_idx), ...]
+    bayesian_network_structure=[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)], 
+    max_parents_bayesian=3 # Utilisé si bayesian_network_structure n'est pas fourni
 )
 ```
 
