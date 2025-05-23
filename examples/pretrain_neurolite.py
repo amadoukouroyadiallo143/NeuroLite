@@ -11,6 +11,12 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tqdm import tqdm
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+    print("Warning: TensorBoard is not available. Install it with 'pip install tensorboard'.")
+
 from neurolite.model import NeuroLiteModel
 from neurolite.config import NeuroLiteConfig
 
@@ -29,13 +35,14 @@ def get_args():
     parser.add_argument("--vocab_size", type=int, default=50000, help="Vocabulary size for the tokenizer.")
     parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length for model input.")
     parser.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training and evaluation.")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training and evaluation.")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Initial learning rate.")
     parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader. Set > 0 for parallel data loading if on Linux/macOS or if __main__ guarded on Windows.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step.")
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Ratio of total training steps for learning rate warmup.")
+    parser.add_argument("--tensorboard_logdir", type=str, default="runs", help="Directory for TensorBoard logs.")
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -136,6 +143,11 @@ class DataCollatorForLanguageModeling:
 
 
 def train_model(args, model, tokenizer, train_dataloader, eval_dataloader=None):
+    writer = None
+    if SummaryWriter is not None:
+        writer = SummaryWriter(log_dir=args.tensorboard_logdir)
+    else:
+        print("TensorBoard is not available. Loss/metrics will not be logged to TensorBoard.")
     """Main training loop."""
     print("Starting training...")
 
@@ -198,6 +210,14 @@ def train_model(args, model, tokenizer, train_dataloader, eval_dataloader=None):
                 loss.backward()
 
             epoch_loss += loss.item() * args.gradient_accumulation_steps # Un-normalize for logging
+            # Log to TensorBoard after optimizer step
+            if writer is not None and (step + 1) % args.gradient_accumulation_steps == 0:
+                writer.add_scalar('Loss/train', loss.item() * args.gradient_accumulation_steps, global_step)
+                if scheduler:
+                    writer.add_scalar('LR', scheduler.get_last_lr()[0], global_step)
+                else:
+                    writer.add_scalar('LR', args.learning_rate, global_step)
+                epoch_step += 1
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if scaler: # AMP
@@ -244,6 +264,9 @@ def train_model(args, model, tokenizer, train_dataloader, eval_dataloader=None):
             evaluate_model(args, model, eval_dataloader, device, epoch, scaler) # Pass scaler for AMP in eval
 
     print("Training finished.")
+    if writer is not None:
+        writer.close()  # Flush and close TensorBoard logs
+
 
 
 def evaluate_model(args, model, eval_dataloader, device, epoch_num=0, scaler=None):

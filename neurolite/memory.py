@@ -128,8 +128,8 @@ class DifferentiableMemory(nn.Module):
         initial_values = self.value_projection(initial_states)
         
         # Stocker dans la mémoire
-        self.memory_keys = initial_keys
-        self.memory_values = initial_values
+        self.memory_keys = initial_keys.detach()
+        self.memory_values = initial_values.detach()
         self.memory_age = torch.zeros(
             batch_size, self.memory_size, device=hidden_states.device
         )
@@ -324,10 +324,10 @@ class DifferentiableMemory(nn.Module):
                 blend_factor = 0.7  # Facteur de mélange (plus élevé = plus de nouvelles données)
                 
                 # Mettre à jour les clés et valeurs pour les emplacements sélectionnés
-                updated_keys[b, indices] = (1 - blend_factor) * memory_keys[b, indices] + \
-                                        blend_factor * input_keys[b, s].unsqueeze(0).expand(len(indices), -1)
-                updated_values[b, indices] = (1 - blend_factor) * memory_values[b, indices] + \
-                                        blend_factor * input_values[b, s].unsqueeze(0).expand(len(indices), -1)
+                updated_keys[b, indices] = (1 - blend_factor) * memory_keys[b, indices].detach() + \
+                                        blend_factor * input_keys[b, s].unsqueeze(0).expand(len(indices), -1).detach()
+                updated_values[b, indices] = (1 - blend_factor) * memory_values[b, indices].detach() + \
+                                        blend_factor * input_values[b, s].unsqueeze(0).expand(len(indices), -1).detach()
                 
                 # Réinitialiser l'âge des emplacements mis à jour
                 updated_age[b, indices] = 0

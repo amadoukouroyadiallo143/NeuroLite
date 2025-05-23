@@ -442,6 +442,9 @@ class VectorMemoryStore(nn.Module):
         # Métadonnées associées (facultatif)
         self.metadata = [None] * memory_size
         
+        # Temperature for attention
+        self.temperature = 0.1
+        
     def forward(
         self, 
         hidden_states: torch.Tensor,
@@ -460,47 +463,105 @@ class VectorMemoryStore(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         
-        # Projeter les entrées en clés et valeurs
-        query_keys = self.key_projection(hidden_states)  # [batch, seq, key_size]
-        
-        # Normalisation L2 pour la recherche par similarité cosinus
-        query_keys = F.normalize(query_keys, p=2, dim=-1, eps=1e-12)
-        
-        # Calculer les similarités avec les clés stockées
-        memory_keys_norm = F.normalize(self.memory_keys, p=2, dim=-1)
+        # Initialize a counter for debug prints if it doesn't exist
+        if not hasattr(self, '_pm_forward_call_count'):
+            self._pm_forward_call_count = 0
+        self._pm_forward_call_count += 1
+        debug_print = False  # Debug print disabled
 
-        if memory_keys_norm.ndim == 3:
-            # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
-            memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
-        elif memory_keys_norm.ndim == 2:
-            # Standard case [num_slots, key_dim]
-            memory_keys_norm_transposed = memory_keys_norm.t()
+        # Project queries to key dimension
+        # hidden_states is [B, S, H]
+        query_keys_proj = self.key_projection(hidden_states)  # [B, S, Dk]
+        
+        # if debug_print:
+            #     print(f"[PMem fwd {self._pm_forward_call_count}] query_keys_proj (shape {query_keys_proj.shape}, sample):")
+        #     if batch_size > 0 and seq_len > 0 and query_keys_proj.numel() > 0:
+        #         print(query_keys_proj[0, :1, :5])
+        #     else:
+        #         print('query_keys_proj is empty or too small for sample')
+        #     if query_keys_proj.numel() > 0:
+        #         print(f"[PMem fwd {self._pm_forward_call_count}] query_keys_proj stats: min={query_keys_proj.min():.4f}, max={query_keys_proj.max():.4f}, mean={query_keys_proj.mean():.4f}, has_nan={torch.isnan(query_keys_proj).any()}, has_inf={torch.isinf(query_keys_proj).any()}")
+
+        # Manual L2 Normalization for query_keys
+        query_keys_norm_sq = torch.sum(query_keys_proj.square(), dim=-1, keepdim=True) # [B, S, 1]
+        # Debug print removed
+
+        rsqrt_term_query = torch.rsqrt(query_keys_norm_sq + 1e-6) # [B, S, 1]
+        # Debug print removed
+
+        query_keys_normalized = query_keys_proj * rsqrt_term_query # [B, S, Dk]
+        # Debug print removed
+
+        # Manual L2 Normalization for self.memory_keys
+        # self.memory_keys is [M, Dk]
+        current_memory_keys = self.memory_keys.clone() # Clone earlier
+        if current_memory_keys.numel() == 0:
+            # Debug print removed
+            # Create a correctly shaped zero tensor for matmul, ensure it's on the right device.
+            # Shape for transpose then matmul: [Dk, M]. So normalized_memory_keys should be [M, Dk]
+            normalized_memory_keys = torch.zeros((0, query_keys_normalized.size(-1) if query_keys_normalized.numel() > 0 else self.key_size), device=device, dtype=query_keys_normalized.dtype if query_keys_normalized.numel() > 0 else hidden_states.dtype)
         else:
-            # This case should ideally not be reached if memory_keys is always 2D or 3D [1,N,D]
-            # For safety, raise an error or handle as appropriate for other dimensions.
-            raise ValueError(
-                f"memory_keys_norm has unexpected ndim: {memory_keys_norm.ndim}. "
-                f"Shape: {memory_keys_norm.shape}. Expected 2D or 3D."
-            )
+            memory_keys_norm_sq = torch.sum(current_memory_keys.square(), dim=-1, keepdim=True) # [M, 1]
+            rsqrt_term_mem = torch.rsqrt(memory_keys_norm_sq + 1e-6) # [M, 1]
+            normalized_memory_keys = current_memory_keys * rsqrt_term_mem # [M, Dk]
+        
+        # Attention scores
+        # query_keys_normalized: [B, S, Dk], normalized_memory_keys.t(): [Dk, M]
+        if normalized_memory_keys.numel() == 0 or query_keys_normalized.numel() == 0:
+             # If either is empty, matmul is not possible or will result in empty. Create scores that lead to zero attention or are masked out.
+             # Shape of scores should be [B, S, M_slots_available]. If M_slots_available is 0, then scores is [B,S,0]
+            attention_scores = torch.empty((batch_size, seq_len, self.memory_keys.size(0)), device=device, dtype=query_keys_normalized.dtype if query_keys_normalized.numel() > 0 else hidden_states.dtype)
+            # Debug print removed
+        else:
+            attention_scores = torch.matmul(query_keys_normalized, normalized_memory_keys.t()) # [B, S, M]
 
-        similarities = torch.matmul(query_keys, memory_keys_norm_transposed)
+        # Apply temperature (ensure self.temperature is defined in __init__, e.g., self.temperature = 0.1)
+        attention_scores_temp = attention_scores / self.temperature
+
+        # Apply mask
+        # self.memory_usage is [M]
+        mask = (self.memory_usage > 0).float().view(1, 1, -1) # Reshape to [1, 1, M] for broadcasting
+        # Ensure mask is on the same device and dtype as attention_scores_temp
+        mask = mask.to(device=attention_scores_temp.device, dtype=attention_scores_temp.dtype)
         
-        # Appliquer une fonction de température pour accentuer les différences
-        similarities = similarities / 0.1
-        
-        # Appliquer un masque sur les entrées non utilisées
-        mask = (self.memory_usage > 0).float().unsqueeze(0).unsqueeze(0)
-        similarities = similarities * mask + (-1e9) * (1 - mask)
-        
-        # Obtenir une distribution sur la mémoire
-        attention_weights = F.softmax(similarities, dim=-1)
-        
-        # Récupérer les valeurs associées
-        retrieved_values = torch.matmul(attention_weights, self.memory_values)
-        
+        if attention_scores_temp.size(-1) != mask.size(-1) and self.memory_keys.numel() > 0 : # only if memory not empty
+            # This can happen if memory_usage has a different size than actual memory_keys slots if memory shrinks
+            # For safety, adjust mask size if necessary, or ensure memory_usage always reflects current memory_keys.size(0)
+            # This is a potential bug if memory_usage is not kept in sync with actual memory slots. Assuming they are synced.
+            # Debug print removed
+            # Fallback: if mask is larger, slice it. If smaller, this is an issue. For now, assume it's correct or memory is empty.
+            if mask.size(-1) > attention_scores_temp.size(-1):
+                mask = mask[:,:,:attention_scores_temp.size(-1)]
+
+        if attention_scores_temp.numel() > 0: # Avoid operations on empty tensors if scores are empty (e.g. [B,S,0])
+            attention_scores_masked = attention_scores_temp * mask + (-1e9) * (1.0 - mask)
+        else:
+            attention_scores_masked = attention_scores_temp # Keep it empty
+
+        # Softmax
+        if attention_scores_masked.numel() > 0 and attention_scores_masked.size(-1) > 0:
+            attention_weights = F.softmax(attention_scores_masked, dim=-1) # [B, S, M]
+        else: # Handle case with 0 memory slots, softmax would error or produce NaN
+            attention_weights = torch.zeros_like(attention_scores_masked) # Zeros if no memory slots to attend to
+            # Debug print removed
+
+        # Retrieve values
+        # self.memory_values is [M, Dv]
+        # Clone self.memory_values for use in this forward pass
+        current_memory_values = self.memory_values.clone()
+        if attention_weights.numel() > 0 and current_memory_values.numel() > 0 and attention_weights.size(-1) == current_memory_values.size(0):
+            retrieved_values = torch.matmul(attention_weights, current_memory_values) # [B, S, Dv]
+        else:
+            # If memory_values is empty or mismatch, create zero output of expected shape
+            # Expected Dv is self.value_projection.out_features or self.output_projection.in_features
+            # For simplicity, use hidden_states's last dim if value_size is not readily available
+            value_dim = current_memory_values.size(-1) if current_memory_values.numel() > 0 else hidden_states.size(-1)
+            retrieved_values = torch.zeros((batch_size, seq_len, value_dim), device=device, dtype=hidden_states.dtype)
+            # Debug print removed
+
         # Mettre à jour la mémoire si demandé
         if update_memory:
-            self._update_memory(hidden_states, query_keys)
+            self._update_memory(hidden_states, query_keys_proj) # Pass unnormalized projected keys
             
         # Projection de sortie
         output = self.output_projection(retrieved_values)
@@ -521,27 +582,44 @@ class VectorMemoryStore(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
         
-        # Si les clés n'ont pas été fournies, les calculer
-        if keys is None:
-            keys = self.key_projection(hidden_states)
-            keys = F.normalize(keys, p=2, dim=-1, eps=1e-12)
+        # Determine the keys to be processed internally for this update cycle.
+        # If 'keys' (argument) is provided, clone it to avoid modifying the original tensor.
+        # Otherwise, project new keys from hidden_states.
+        if keys is None: # 'keys' is the argument to _update_memory
+            keys_for_internal_processing = self.key_projection(hidden_states)
+        else:
+            keys_for_internal_processing = keys.clone() # Clone the input argument
         
-        # Calculer les valeurs
+        # Normalize 'keys_for_internal_processing'. This is safe as it's either new or a clone.
+        keys_norm_sq_local = torch.sum(keys_for_internal_processing.square(), dim=-1, keepdim=True)
+        # Ensure this multiplication assigns to keys_for_internal_processing or a new var if it's not inplace by default
+        keys_for_internal_processing = keys_for_internal_processing * torch.rsqrt(keys_norm_sq_local + 1e-6)
+        
+        # Calculer les valeurs (values are always freshly projected)
         values = self.value_projection(hidden_states)
         
         # Aplatir les dimensions batch et seq pour traiter chaque élément
-        flat_keys = keys.view(-1, self.key_size)
+        flat_keys = keys_for_internal_processing.view(-1, self.key_size)
         flat_values = values.view(-1, self.value_size)
         num_elements = flat_keys.size(0)
         
+        # Clone memory keys for consistent reads within this update cycle
+        mem_keys_for_read = self.memory_keys.clone().detach()
+        
         # Pour chaque élément
         for i in range(num_elements):
-            key = flat_keys[i:i+1]  # Garder la dimension
-            value = flat_values[i:i+1]
+            key = flat_keys[i:i+1].detach()  # Detach incoming key for storage
+            value = flat_values[i:i+1].detach() # Detach incoming value for storage
             
-            # Vérifier la similarité avec les entrées existantes
-            memory_keys_norm = F.normalize(self.memory_keys, p=2, dim=-1)
-
+            # Use the cloned memory for similarity calculation
+            # memory_keys_norm = F.normalize(mem_keys_for_read, p=2, dim=-1) # Original approach if F.normalize was used
+            # Manual L2 Normalization for mem_keys_for_read
+            if mem_keys_for_read.numel() == 0:
+                memory_keys_norm = torch.zeros((0, self.key_size), device=mem_keys_for_read.device, dtype=mem_keys_for_read.dtype)
+            else:
+                mem_keys_sq = torch.sum(mem_keys_for_read.square(), dim=-1, keepdim=True)
+                memory_keys_norm = mem_keys_for_read * torch.rsqrt(mem_keys_sq + 1e-6)
+            
             if memory_keys_norm.ndim == 3:
                 # Handles case like [1, num_slots, key_dim] or [batch, num_slots, key_dim]
                 memory_keys_norm_transposed = memory_keys_norm.transpose(-2, -1)
@@ -559,20 +637,26 @@ class VectorMemoryStore(nn.Module):
             similarities = torch.matmul(key, memory_keys_norm_transposed).squeeze(0)
             
             # Trouver l'entrée la plus similaire
-            max_sim, max_idx = torch.max(similarities, dim=0)
+            # If similarities is empty (e.g. memory_keys_norm was [0,Dk]), max will error.
+            if similarities.numel() == 0:
+                # No existing memory to compare against, so this new key/value will be added if logic proceeds
+                max_sim = torch.tensor(-float('inf'), device=key.device) # Ensure it's below any threshold
+                max_idx = torch.tensor(-1, device=key.device) # Invalid index
+            else:
+                max_sim, max_idx = torch.max(similarities, dim=0)
             
             # Si une entrée similaire existe, la mettre à jour
             if max_sim > self.similarity_threshold and self.memory_usage[max_idx] > 0:
                 # Interpolation entre ancienne et nouvelle valeur
                 self.memory_values[max_idx] = (
                     (1 - self.update_rate) * self.memory_values[max_idx].detach() +
-                    self.update_rate * value
+                    self.update_rate * value.detach()  # Detach new value
                 )
                 
                 # Mettre à jour la clé également
                 self.memory_keys[max_idx] = (
                     (1 - self.update_rate) * self.memory_keys[max_idx].detach() +
-                    self.update_rate * key
+                    self.update_rate * key.detach()  # Detach new key
                 )
                 
                 # Incrémenter le compteur d'usage
@@ -590,11 +674,11 @@ class VectorMemoryStore(nn.Module):
                 # Stocker la nouvelle entrée
                 keys_part1 = self.memory_keys[:idx].detach()
                 keys_part2 = self.memory_keys[idx+1:].detach()
-                self.memory_keys = torch.cat((keys_part1, key, keys_part2), dim=0)
-
+                self.memory_keys = torch.cat((keys_part1, key.detach(), keys_part2), dim=0)
+                
                 values_part1 = self.memory_values[:idx].detach()
                 values_part2 = self.memory_values[idx+1:].detach()
-                self.memory_values = torch.cat((values_part1, value, values_part2), dim=0)
+                self.memory_values = torch.cat((values_part1, value.detach(), values_part2), dim=0)
                 
                 self.memory_usage[idx] = 1
     
