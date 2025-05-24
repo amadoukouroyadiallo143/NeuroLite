@@ -321,7 +321,13 @@ def main():
 
     # Load dataset (tyzhu/wikitext-103-raw-v1-sent-permute-9)
     print("Loading dataset tyzhu/wikitext-103-raw-v1-sent-permute-9 ...")
-    raw_datasets = load_dataset("tyzhu/wikitext-103-raw-v1-sent-permute-9")
+    cache_dir = os.path.join(os.getcwd(), 'dataset_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    raw_datasets = load_dataset(
+        "tyzhu/wikitext-103-raw-v1-sent-permute-9",
+        cache_dir=cache_dir,
+        download_mode='force_redownload'
+    )
     # Découpage train/validation (99%/1%)
     split = raw_datasets["train"].train_test_split(test_size=0.01, seed=args.seed)
     train_dataset = split["train"]
