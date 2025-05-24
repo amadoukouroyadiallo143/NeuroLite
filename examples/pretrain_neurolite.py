@@ -71,9 +71,10 @@ def train_tokenizer(args, dataset):
         print(f"Tokenizer saved to {tokenizer_path}")
     return tokenizer
 
-def prepare_dataset(args, tokenizer, raw_datasets):
+def prepare_dataset(args, tokenizer, dataset):
     """Tokenize and group texts for language modeling."""
-    column_names = raw_datasets["train"].column_names
+    # dataset: HuggingFace Dataset
+    column_names = dataset.column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     def tokenize_function(examples):
@@ -85,11 +86,10 @@ def prepare_dataset(args, tokenizer, raw_datasets):
         # datasets.map expects a dictionary of lists
         return {"input_ids": [encoding.ids for encoding in encodings]}
 
-    tokenized_datasets = raw_datasets.map(
+    tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
-        remove_columns=column_names,
-        desc="Running tokenizer on dataset"
+        desc="Tokenizing texts",
     )
 
     def group_texts(examples):
@@ -107,12 +107,13 @@ def prepare_dataset(args, tokenizer, raw_datasets):
         result["labels"] = result["input_ids"].copy() # For causal LM, labels are shifted in the model or loss function
         return result
 
-    lm_datasets = tokenized_datasets.map(
+    lm_dataset = tokenized_dataset.map(
         group_texts,
         batched=True,
         desc=f"Grouping texts into chunks of {args.max_seq_length}",
     )
-    return lm_datasets
+    return lm_dataset
+
 
 
 class DataCollatorForLanguageModeling:
@@ -340,8 +341,8 @@ def main():
     print(f"Preparing dataset for language modeling (grouping texts to max_seq_length: {args.max_seq_length})...")
 
     # Adapter prepare_dataset pour fonctionner avec DatasetDict ou Dataset simple
-    train_dataset_tok = prepare_dataset(args, tokenizer, {"train": train_dataset})["train"]
-    eval_dataset_tok = prepare_dataset(args, tokenizer, {"validation": eval_dataset})["validation"]
+    train_dataset_tok = prepare_dataset(args, tokenizer, train_dataset)
+    eval_dataset_tok = prepare_dataset(args, tokenizer, eval_dataset)
 
     print(f"Tokenized train: {len(train_dataset_tok)} examples, eval: {len(eval_dataset_tok)} examples")
 
