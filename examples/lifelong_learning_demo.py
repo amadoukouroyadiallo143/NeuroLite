@@ -21,8 +21,8 @@ It does not involve actual model training or performance evaluation.
 
 import torch
 from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
-from neurolite.continual import ContinualAdapter # For type checking and buffer access
+from neurolite.Configs.config import NeuroLiteConfig
+from neurolite.continual.continual import ContinualAdapter # For type checking and buffer access
 from neurolite.hierarchical_memory import HierarchicalMemory # For potential inspection
 
 def run_lifelong_learning_demo():

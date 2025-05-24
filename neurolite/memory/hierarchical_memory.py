@@ -12,7 +12,7 @@ import time
 import numpy as np
 from typing import Optional, Tuple, Dict, List, Union, Any
 from .memory import DifferentiableMemory
-from .config import NeuroLiteConfig
+from ..Configs.config import NeuroLiteConfig
 
 class HierarchicalMemory(nn.Module):
     """
@@ -100,6 +100,98 @@ class HierarchicalMemory(nn.Module):
         # Seuil de nouveauté pour la consolidation (configurable si besoin)
         self.novelty_threshold_ltm = getattr(config, 'novelty_threshold_ltm', 0.5) # Example threshold
         self.novelty_threshold_pm = getattr(config, 'novelty_threshold_pm', 0.6)  # Example threshold
+        
+    def search(self, query_embedding: torch.Tensor, k: int = 3) -> Dict[str, List[Tuple[float, torch.Tensor]]]:
+        """
+        Searches across all memory levels for the given query embedding.
+
+        Args:
+            query_embedding: Tensor representation of the query [batch_size, hidden_size].
+                             For the demo, batch_size is typically 1.
+            k: Number of top results to retrieve from each memory level.
+
+        Returns:
+            A dictionary with keys 'short_term', 'long_term', 'persistent',
+            each containing a list of (score, value_tensor) tuples.
+        """
+        results: Dict[str, List[Tuple[float, torch.Tensor]]] = {
+            'short_term': [],
+            'long_term': [],
+            'persistent': []
+        }
+        device = query_embedding.device
+
+        # Assuming query_embedding is [1, hidden_size] for interactive demo
+        if query_embedding.dim() == 2 and query_embedding.size(0) > 1:
+            # If batch_size > 1, process only the first item for this simplified search demo
+            # A more robust implementation would handle batch searches appropriately
+            query_emb_single = query_embedding[0].unsqueeze(0)
+        elif query_embedding.dim() == 1:
+            query_emb_single = query_embedding.unsqueeze(0) # Ensure [1, hidden_size]
+        else:
+            query_emb_single = query_embedding # Assumes [1, hidden_size]
+
+        # Search Short-Term Memory (DifferentiableMemory)
+        if self.short_term_memory.initialized and self.short_term_memory.memory_keys.nelement() > 0:
+            try:
+                projected_query_stm = self.short_term_memory.query_projection(query_emb_single) # [1, key_size]
+                stm_keys = self.short_term_memory.memory_keys[0]  # [memory_size, key_size]
+                
+                if stm_keys.numel() > 0 and projected_query_stm.numel() > 0:
+                    similarities_stm = F.cosine_similarity(projected_query_stm, stm_keys, dim=-1) # [memory_size]
+                    actual_k_stm = min(k, similarities_stm.size(0))
+                    if actual_k_stm > 0:
+                        top_scores_stm, top_indices_stm = torch.topk(similarities_stm, actual_k_stm)
+                        top_values_stm = self.short_term_memory.memory_values[0, top_indices_stm]
+                        results['short_term'] = [(score.item(), value) for score, value in zip(top_scores_stm, top_values_stm)]
+            except Exception as e:
+                print(f"Error searching short-term memory: {e}")
+                results['short_term'] = []
+
+        # Search Long-Term Memory (DifferentiableMemory)
+        if self.long_term_memory.initialized and self.long_term_memory.memory_keys.nelement() > 0:
+            try:
+                projected_query_ltm = self.long_term_memory.query_projection(query_emb_single) # [1, key_size]
+                ltm_keys = self.long_term_memory.memory_keys[0]  # [memory_size, key_size]
+
+                if ltm_keys.numel() > 0 and projected_query_ltm.numel() > 0:
+                    similarities_ltm = F.cosine_similarity(projected_query_ltm, ltm_keys, dim=-1) # [memory_size]
+                    actual_k_ltm = min(k, similarities_ltm.size(0))
+                    if actual_k_ltm > 0:
+                        top_scores_ltm, top_indices_ltm = torch.topk(similarities_ltm, actual_k_ltm)
+                        top_values_ltm = self.long_term_memory.memory_values[0, top_indices_ltm]
+                        results['long_term'] = [(score.item(), value) for score, value in zip(top_scores_ltm, top_values_ltm)]
+            except Exception as e:
+                print(f"Error searching long-term memory: {e}")
+                results['long_term'] = []
+
+        # Search Persistent Memory (VectorMemoryStore)
+        if self.persistent_memory.active_entries > 0:
+            try:
+                # VectorMemoryStore.search expects query: Tensor [batch_size, hidden_size]
+                # It returns (indices, similarities) where similarities are scores
+                # query_emb_single is already [1, hidden_size]
+                pm_indices, pm_scores = self.persistent_memory.search(query=query_emb_single, top_k=k)
+                
+                if pm_indices.numel() > 0:
+                    # pm_indices might be [1, k] or [k]. Squeeze to handle both.
+                    pm_indices_squeezed = pm_indices.squeeze()
+                    if pm_indices_squeezed.dim() == 0: # Handle case where k=1 and squeeze makes it scalar
+                        pm_indices_squeezed = pm_indices_squeezed.unsqueeze(0)
+                    
+                    pm_values = self.persistent_memory.memory_values[pm_indices_squeezed]
+                    
+                    # pm_scores might be [1, k] or [k]. Squeeze to match iteration.
+                    pm_scores_squeezed = pm_scores.squeeze()
+                    if pm_scores_squeezed.dim() == 0: # Handle k=1
+                         pm_scores_squeezed = pm_scores_squeezed.unsqueeze(0)
+
+                    results['persistent'] = [(score.item(), value) for score, value in zip(pm_scores_squeezed, pm_values)]
+            except Exception as e:
+                print(f"Error searching persistent memory: {e}")
+                results['persistent'] = []
+                
+        return results
         
     def _calculate_novelty_score(self, input_keys: torch.Tensor, memory_keys: torch.Tensor) -> float:
         """

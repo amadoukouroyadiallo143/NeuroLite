@@ -3,7 +3,7 @@ import torch
 import json
 import os
 from neurolite.symbolic import NeuralSymbolicLayer
-from neurolite.config import NeuroLiteConfig
+from neurolite.Configs.config import NeuroLiteConfig
 
 # Fixture for a dummy rules.json file
 @pytest.fixture(scope="module") # Use module scope for efficiency if file content is static

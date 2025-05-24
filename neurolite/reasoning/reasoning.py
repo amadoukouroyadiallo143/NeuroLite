@@ -4,6 +4,7 @@ Implémente des capacités de raisonnement symbolique, planification et inféren
 pour des tâches nécessitant un haut niveau d'abstraction.
 """
 
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -241,6 +242,34 @@ class StructuredPlanner(nn.Module):
         # Intégration du plan dans la représentation
         self.plan_integration = nn.Linear(hidden_size + plan_dim * num_planning_steps, hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
+        
+    def generate_plan(self, goal: str, num_steps: int = 5) -> Dict[str, Any]:
+        """
+        Génère un plan structuré à partir d'un objectif textuel.
+        
+        Args:
+            goal: L'objectif à atteindre (en texte)
+            num_steps: Nombre d'étapes de planification
+            
+        Returns:
+            Un dictionnaire contenant les étapes du plan généré
+        """
+        # Ici, nous simulons un plan simple basé sur l'objectif
+        # Dans une implémentation réelle, vous utiliseriez le modèle pour générer le plan
+        
+        # Exemple de plan générique
+        steps = []
+        
+        # Nettoyer l'objectif pour l'affichage
+        goal_clean = goal.strip().capitalize()
+        if not goal_clean.endswith(('.', '!', '?')):
+            goal_clean += '.'
+            
+        return {
+            'goal': goal_clean,
+            'steps': steps[:num_steps],
+            'generated_at': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
         
     def forward(
         self, 

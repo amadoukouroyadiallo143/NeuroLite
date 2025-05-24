@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Union, Tuple
-from .projection import MinHashBloomProjection
+from ..projection import MinHashBloomProjection
 
 class MultimodalProjection(nn.Module):
     """

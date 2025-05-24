@@ -1,7 +1,7 @@
 import pytest
 import torch
 from neurolite.hierarchical_memory import HierarchicalMemory
-from neurolite.config import NeuroLiteConfig # Assuming this is needed for config defaults
+from neurolite.Configs.config import NeuroLiteConfig # For config defaults
 
 # Fixture for a basic HierarchicalMemory configuration
 @pytest.fixture

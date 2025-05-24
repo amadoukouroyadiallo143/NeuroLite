@@ -5,7 +5,7 @@ This example shows how to configure the model to include the probabilistic reaso
 
 import torch
 from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
+from neurolite.Configs.config import NeuroLiteConfig
 from neurolite.symbolic import BayesianBeliefNetwork # For type checking
 
 def run_bayesian_network_example():

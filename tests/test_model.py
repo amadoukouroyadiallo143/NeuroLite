@@ -1,8 +1,8 @@
 import pytest
 import torch
 from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
-from neurolite.continual import ContinualAdapter
+from neurolite.Configs.config import NeuroLiteConfig
+from neurolite.continual.continual import ContinualAdapter
 
 # Fixture for a basic NeuroLiteConfig
 @pytest.fixture

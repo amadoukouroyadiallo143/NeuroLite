@@ -1,79 +1,163 @@
-import argparse
+"""
+Script de pré-entraînement NeuroLite - Version Professionnelle
+"""
+
 import os
 import time
-import json 
+from datetime import datetime
 import torch
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
+from tqdm import tqdm
+import numpy as np
+import argparse
+from data_loader import NeuroLiteDataset, prepare_dataset
+from torch.utils.tensorboard import SummaryWriter
+
+from neurolite import (
+    NeuroLiteModel,
+    NeuroLiteConfig
+)
+
 from datasets import load_dataset
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
-from tqdm import tqdm
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    SummaryWriter = None
-    print("Warning: TensorBoard is not available. Install it with 'pip install tensorboard'.")
-
-from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
-
-try:
-    from transformers import get_linear_schedule_with_warmup
-except ImportError:
-    get_linear_schedule_with_warmup = None
-    print("Warning: transformers library not found or too old. Learning rate scheduler will not be available.")
-
-def get_args():
-    parser = argparse.ArgumentParser(description="Pretrain NeuroLite Model")
-    parser.add_argument("--dataset_name", type=str, default="wikitext", help="Dataset name from Hugging Face datasets.")
-    parser.add_argument("--dataset_config_name", type=str, default="wikitext-2-raw-v1", help="Specific configuration of the dataset.")
-    parser.add_argument("--output_dir", type=str, default="models/neurolite-tiny-agi", help="Directory to save tokenizer and model checkpoints.")
-    parser.add_argument("--model_config_name", type=str, default="tiny", choices=["tiny", "small", "base"], help="NeuroLite model configuration size.")
-    parser.add_argument("--vocab_size", type=int, default=50000, help="Vocabulary size for the tokenizer.")
-    parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length for model input.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training and evaluation.")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Initial learning rate.")
-    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-    parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader. Set > 0 for parallel data loading if on Linux/macOS or if __main__ guarded on Windows.")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step.")
-    parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Ratio of total training steps for learning rate warmup.")
-    parser.add_argument("--tensorboard_logdir", type=str, default="runs", help="Directory for TensorBoard logs.")
-
-    args = parser.parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
-    return args
-
-def train_tokenizer(args, dataset):
-    """Trains or loads a BPE tokenizer."""
-    tokenizer_path = os.path.join(args.output_dir, "tokenizer.json")
-    if os.path.exists(tokenizer_path):
-        print(f"Loading tokenizer from {tokenizer_path}")
-        tokenizer = Tokenizer.from_file(tokenizer_path)
-    else:
-        print("Training a new BPE tokenizer...")
-        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-        tokenizer.pre_tokenizer = Whitespace()
+# Configuration du logger
+class TrainingLogger:
+    def __init__(self, log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = os.path.join(log_dir, "training.log")
         
-        trainer = BpeTrainer(vocab_size=args.vocab_size, special_tokens=["[UNK]", "[PAD]", "[CLS]", "[SEP]", "[MASK]"])
+    def log(self, message):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.log_file, "a") as f:
+            f.write(f"[{timestamp}] {message}\n")
+        print(message)
+
+# Early Stopping
+class EarlyStopping:
+    def __init__(self, patience=3, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = float('inf')
         
-        def text_iterator(dataset_split):
-            for i in range(0, len(dataset_split), 1000):
-                yield dataset_split[i: i + 1000]["text"]
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
 
-        tokenizer.train_from_iterator(text_iterator(dataset["train"]), trainer=trainer)
-        os.makedirs(args.output_dir, exist_ok=True)
-        tokenizer.save(tokenizer_path)
-        print(f"Tokenizer saved to {tokenizer_path}")
-    return tokenizer
+# Configuration Distributed
+def setup_distributed():
+    dist.init_process_group('nccl')
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    return local_rank
 
+# Hyperparameter Tuning
+class HyperparameterTuner:
+    @staticmethod
+    def get_lr_schedule(lr, warmup_steps, total_steps):
+        """Schedule triangulaire pour le learning rate"""
+        return lambda step: lr * min(1, step/warmup_steps) * min(1, (total_steps - step)/total_steps)
+
+# Fonction d'entraînement optimisée
+def train_model(args, model, tokenizer, train_dataloader, eval_dataloader, logger):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    
+    # Configuration de l'optimiseur
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
+    total_steps = len(train_dataloader) * args.epochs
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=int(total_steps * args.warmup_ratio),
+        num_training_steps=total_steps
+    )
+    
+    # Mixed Precision Training
+    scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
+    
+    # Mémoire GPU
+    logger.log(f"Mémoire GPU allouée: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
+    
+    best_loss = float('inf')
+    for epoch in range(args.epochs):
+        model.train()
+        epoch_loss = 0
+        
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}")
+        for step, batch in enumerate(progress_bar):
+            if args.test_mode and step >= args.max_test_steps:
+                break
+                
+            batch = {k: v.to(device) for k, v in batch.items()}
+            
+            with torch.cuda.amp.autocast(enabled=args.fp16):
+                outputs = model(**batch)
+                loss = outputs.loss / args.gradient_accumulation_steps
+            
+            scaler.scale(loss).backward()
+            
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+                
+            epoch_loss += loss.item()
+            progress_bar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'lr': f"{scheduler.get_last_lr()[0]:.1e}",
+                'gpu': f"{torch.cuda.memory_allocated()/1024**2:.0f}MB"
+            })
+        
+        # Validation
+        eval_loss = evaluate(model, eval_dataloader, device, args)
+        logger.log(f"Epoch {epoch+1} - Train Loss: {epoch_loss/len(train_dataloader):.4f} | Eval Loss: {eval_loss:.4f}")
+        
+        # Sauvegarde
+        if eval_loss < best_loss:
+            best_loss = eval_loss
+            model.save_pretrained(args.output_dir)
+            tokenizer.save_pretrained(args.output_dir)
+            logger.log(f"Checkpoint saved to {args.output_dir}")
+
+# Fonction d'évaluation
+def evaluate(model, dataloader, device, args):
+    model.eval()
+    total_loss = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            total_loss += outputs.loss.item()
+    
+    return total_loss / len(dataloader)
+
+# Fonction de chargement des données
+def load_datasets(data_dir, test_mode):
+    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", data_dir=data_dir)
+    if test_mode:
+        dataset = dataset.shuffle(seed=42).select(range(1000))
+    
+    train_dataset, eval_dataset = dataset["train"].train_test_split(test_size=0.01, seed=42)
+    
+    return train_dataset, eval_dataset
+
+# Fonction de préparation des données
 def prepare_dataset(args, tokenizer, dataset):
-    """Tokenize and group texts for language modeling."""
-    # dataset: HuggingFace Dataset
     column_names = dataset.column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -114,282 +198,140 @@ def prepare_dataset(args, tokenizer, dataset):
     )
     return lm_dataset
 
-
-
-class DataCollatorForLanguageModeling:
-    """Collator for language modeling that handles padding and labels."""
-    def __init__(self, tokenizer, mlm=False): # mlm not used here, but common for collators
-        self.tokenizer = tokenizer
-        self.mlm = mlm
-
-    def __call__(self, examples):
-        input_ids = [torch.tensor(e["input_ids"], dtype=torch.long) for e in examples]
-        labels = [torch.tensor(e["labels"], dtype=torch.long) for e in examples]
-        
-        # Pad to the longest sequence in the batch
-        # Since group_texts creates fixed-size chunks, all sequences in a batch *should* be max_seq_length
-        # However, the last batch of a dataset split might be smaller if not dropped.
-        # For simplicity here, we assume all are max_seq_length from group_texts.
-        # If dynamic padding were needed: input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
-        #                               labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100) # -100 is ignore_index for loss
-
-        input_ids_tensor = torch.stack(input_ids)
-        labels_tensor = torch.stack(labels)
-        
-        # For causal LM, NeuroLiteModel's forward pass handles shifting labels if task_type is 'generation'
-        # and labels are provided. So, labels can be the same as input_ids here.
-        # Since group_texts creates fixed-size chunks with no padding, attention_mask can be None.
-        # MultiheadAttention handles None key_padding_mask as no masking.
-        return {"input_ids": input_ids_tensor, "labels": labels_tensor, "attention_mask": None}
-
-
-def train_model(args, model, tokenizer, train_dataloader, eval_dataloader=None):
-    writer = None
-    if SummaryWriter is not None:
-        writer = SummaryWriter(log_dir=args.tensorboard_logdir)
-    else:
-        print("TensorBoard is not available. Loss/metrics will not be logged to TensorBoard.")
-    """Main training loop."""
-    print("Starting training...")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    print(f"Training on device: {device}")
-
-    # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-
-    # Learning rate scheduler
-    num_training_steps = args.num_train_epochs * len(train_dataloader) // args.gradient_accumulation_steps
-    num_warmup_steps = int(args.warmup_ratio * num_training_steps)
+# Fonction de chargement du modèle
+def load_model(args):
+    config = NeuroLiteConfig.from_json_file(args.config_file)
+    tokenizer = NeuroLiteTokenizer.from_pretrained(config.tokenizer_name)
+    model = NeuroLiteModel(config)
     
-    scheduler = None
-    if get_linear_schedule_with_warmup:
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps
-        )
-        print(f"Scheduler enabled: Linear warmup ({num_warmup_steps} steps) and decay ({num_training_steps} total steps).")
-    else:
-        print("Scheduler disabled as 'transformers.get_linear_schedule_with_warmup' is not available.")
+    return model, tokenizer
 
-    # AMP GradScaler
-    scaler = None
-    if device.type == 'cuda':
-        scaler = torch.cuda.amp.GradScaler()
-        print("CUDA detected, using Automatic Mixed Precision (AMP).")
-
-    global_step = 0
-    model.zero_grad() # Clear gradients before starting, important for gradient accumulation
-
-    for epoch in range(args.num_train_epochs):
-        print(f"--- Epoch {epoch+1}/{args.num_train_epochs} ---")
-        model.train() # Set model to training mode
-        epoch_loss = 0
-        
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}", leave=False)
-        for step, batch in enumerate(progress_bar):
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-            attention_mask = batch["attention_mask"].to(device) if batch["attention_mask"] is not None else None
-
-            if scaler: # AMP enabled
-                with torch.cuda.amp.autocast():
-                    outputs = model(multimodal_inputs={"input_ids": input_ids}, attention_mask=attention_mask, labels=labels)
-                    loss = outputs["loss"] # Access loss by key
-                if loss is None:
-                    print("Warning: Loss is None with AMP. Check model's forward pass and label provision.")
-                    continue
-                loss = loss / args.gradient_accumulation_steps # Normalize loss for accumulation
-                scaler.scale(loss).backward()
-            else: # AMP disabled or CPU
-                outputs = model(multimodal_inputs={"input_ids": input_ids}, attention_mask=attention_mask, labels=labels)
-                loss = outputs["loss"] # Access loss by key
-                if loss is None:
-                    print("Warning: Loss is None. Check model's forward pass and label provision.")
-                    continue
-                loss = loss / args.gradient_accumulation_steps
-                loss.backward()
-
-            epoch_loss += loss.item() * args.gradient_accumulation_steps # Un-normalize for logging
-            # Log to TensorBoard after optimizer step
-            if writer is not None and (step + 1) % args.gradient_accumulation_steps == 0:
-                writer.add_scalar('Loss/train', loss.item() * args.gradient_accumulation_steps, global_step)
-                if scheduler:
-                    writer.add_scalar('LR', scheduler.get_last_lr()[0], global_step)
-                else:
-                    writer.add_scalar('LR', args.learning_rate, global_step)
-                epoch_step += 1
-
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                if scaler: # AMP
-                    # Unscales gradients and calls optimizer.step() or skips if gradients are inf/NaN
-                    scaler.step(optimizer)
-                    # Updates the scale for next iteration
-                    scaler.update()
-                else: # No AMP
-                    optimizer.step()
-                
-                if scheduler:
-                    scheduler.step()
-                
-                optimizer.zero_grad()
-                global_step += 1
-
-                progress_bar.set_postfix({'loss': f'{loss.item() * args.gradient_accumulation_steps:.4f}', 'lr': f'{scheduler.get_last_lr()[0]:.2e}' if scheduler else f'{args.learning_rate:.2e}'})
-
-                if global_step % args.save_steps == 0: # Save checkpoint
-                    checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-                    # It's good practice to save the model state dict, optimizer state dict, and args
-                    # model.save_pretrained(checkpoint_dir) # This might not work if model is not a PreTrainedModel from transformers
-                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, "pytorch_model.bin"))
-                    torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, "optimizer.pt"))
-                    if scheduler:
-                        torch.save(scheduler.state_dict(), os.path.join(checkpoint_dir, "scheduler.pt"))
-                    with open(os.path.join(checkpoint_dir, "training_args.json"), 'w') as f:
-                        json.dump(vars(args), f, indent=4)
-                    
-                    # Save tokenizer using its own save method if it's a Tokenizer object from 'tokenizers'
-                    if hasattr(tokenizer, 'save') and callable(getattr(tokenizer, 'save')):
-                         tokenizer.save(os.path.join(checkpoint_dir, "tokenizer.json"))
-                    else: # If it's a transformers tokenizer, it would be tokenizer.save_pretrained()
-                        print("Warning: Tokenizer type not fully handled for saving with checkpoint. Ensure it's saved correctly.")
-                    print(f"Checkpoint saved to {checkpoint_dir}")
-        progress_bar.close()
-
-        avg_epoch_loss = epoch_loss / len(train_dataloader)
-        print(f"End of Epoch {epoch+1}, Average Loss: {avg_epoch_loss:.4f}")
-
-        # Optional: Evaluation step at the end of each epoch
-        if eval_dataloader:
-            evaluate_model(args, model, eval_dataloader, device, epoch, scaler) # Pass scaler for AMP in eval
-
-    print("Training finished.")
-    if writer is not None:
-        writer.close()  # Flush and close TensorBoard logs
-
-
-
-def evaluate_model(args, model, eval_dataloader, device, epoch_num=0, scaler=None):
-    print(f"--- Evaluating model at end of epoch {epoch_num+1} ---")
-    model.eval() # Set model to evaluation mode
-    total_eval_loss = 0
-    progress_bar_eval = tqdm(eval_dataloader, desc=f"Evaluating Epoch {epoch_num+1}", leave=False)
-    with torch.no_grad(): # Disable gradient calculations
-        for batch in progress_bar_eval:
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-            attention_mask = batch["attention_mask"].to(device) if batch["attention_mask"] is not None else None
-
-            if scaler and device.type == 'cuda': # Use AMP for evaluation if enabled and on CUDA
-                with torch.cuda.amp.autocast():
-                    outputs = model(multimodal_inputs={"input_ids": input_ids}, attention_mask=attention_mask, labels=labels)
-                    loss = outputs["loss"] # Access loss by key
-            else:
-                outputs = model(multimodal_inputs={"input_ids": input_ids}, attention_mask=attention_mask, labels=labels)
-                loss = outputs["loss"] # Access loss by key
-
-            if loss is not None:
-                total_eval_loss += loss.item()
-            else:
-                print("Warning: Eval loss is None.")
-            progress_bar_eval.set_postfix({'eval_loss': f'{loss.item():.4f}' if loss else 'N/A'})
-    progress_bar_eval.close()
-
-    avg_eval_loss = total_eval_loss / len(eval_dataloader)
-    print(f"Evaluation Loss: {avg_eval_loss:.4f}")
-    try:
-        perplexity = torch.exp(torch.tensor(avg_eval_loss))
-        print(f"Perplexity: {perplexity.item():.2f}")
-    except OverflowError:
-        print("Perplexity calculation resulted in overflow (loss too high).")
-    
-    model.train() # Set model back to training mode
-
-def main():
-    args = get_args()
-    print(f"Arguments: {args}")
-
-    # Enable anomaly detection for debugging inplace operations
-    torch.autograd.set_detect_anomaly(True)
-
-    # Set seed for reproducibility
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    # Potentially add numpy.random.seed(args.seed) and random.seed(args.seed) if used
-
-    # Load dataset (tyzhu/wikitext-103-raw-v1-sent-permute-9)
-    print("Loading dataset tyzhu/wikitext-103-raw-v1-sent-permute-9 ...")
-    raw_datasets = load_dataset("tyzhu/wikitext-103-raw-v1-sent-permute-9")
-    # Découpage train/validation (99%/1%)
-    split = raw_datasets["train"].train_test_split(test_size=0.01, seed=args.seed)
-    train_dataset = split["train"]
-    eval_dataset = split["test"]
-    print(f"Dataset loaded: {len(train_dataset)} train, {len(eval_dataset)} validation examples")
-
-    # Setup tokenizer
+# Fonction de chargement du tokenizer
+def load_tokenizer(args):
     tokenizer_path = os.path.join(args.output_dir, "tokenizer.json")
     if os.path.exists(tokenizer_path):
         print(f"Loading tokenizer from {tokenizer_path}")
         tokenizer = Tokenizer.from_file(tokenizer_path)
     else:
-        tokenizer = train_tokenizer(args, raw_datasets)
-    print(f"Tokenizer vocabulary size: {tokenizer.get_vocab_size()}")
+        print("Training a new BPE tokenizer...")
+        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = Whitespace()
+        
+        trainer = BpeTrainer(vocab_size=args.vocab_size, special_tokens=["[UNK]", "[PAD]", "[CLS]", "[SEP]", "[MASK]"])
+        
+        def text_iterator(dataset_split):
+            for i in range(0, len(dataset_split), 1000):
+                yield dataset_split[i: i + 1000]["text"]
 
-    # Prepare dataset for language modeling (tokenization + grouping)
-    print(f"Preparing dataset for language modeling (grouping texts to max_seq_length: {args.max_seq_length})...")
-
-    # Adapter prepare_dataset pour fonctionner avec DatasetDict ou Dataset simple
-    train_dataset_tok = prepare_dataset(args, tokenizer, train_dataset)
-    eval_dataset_tok = prepare_dataset(args, tokenizer, eval_dataset)
-
-    print(f"Tokenized train: {len(train_dataset_tok)} examples, eval: {len(eval_dataset_tok)} examples")
-
-    # Data collator
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer)
-
-    # DataLoaders
-    train_dataloader = DataLoader(
-        train_dataset_tok, 
-        batch_size=args.batch_size, 
-        collate_fn=data_collator, 
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True if torch.cuda.is_available() else False
-    )
-    eval_dataloader = DataLoader(
-        eval_dataset_tok,
-        batch_size=args.batch_size,
-        collate_fn=data_collator,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True if torch.cuda.is_available() else False
-    )
-
-    # Initialize model
-    print("Initializing NeuroLite model...")
-    if args.model_config_name == "tiny":
-        config = NeuroLiteConfig.tiny()
-    elif args.model_config_name == "small":
-        config = NeuroLiteConfig.small()
-    else: # base
-        config = NeuroLiteConfig.base()
+        tokenizer.train_from_iterator(text_iterator(dataset["train"]), trainer=trainer)
+        os.makedirs(args.output_dir, exist_ok=True)
+        tokenizer.save(tokenizer_path)
+        print(f"Tokenizer saved to {tokenizer_path}")
     
-    # Override config with specific needs for pretraining if necessary
-    config.vocab_size = tokenizer.get_vocab_size() # Ensure model vocab size matches tokenizer
-    config.max_seq_length = args.max_seq_length
-    config.input_projection_type = "tokenized_minhash" # Ensure this is set for text token inputs
-    config.use_multimodal_input = False # Explicitly for text-only pretraining
+    return tokenizer
 
-    model = NeuroLiteModel(config, task_type="generation", tokenizer=tokenizer) # task_type="generation" for causal LM
-    print(f"Model initialized. Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-
-    print(f"DataLoaders created. Train batches: {len(train_dataloader)}, Eval batches: {len(eval_dataloader)}")
-
-    # Train the model
-    train_model(args, model, tokenizer, train_dataloader, eval_dataloader)
+# Nouvelle fonction d'entraînement
+def train(args):
+    # Initialisation distributed si nécessaire
+    if args.distributed:
+        local_rank = setup_distributed()
+    else:
+        local_rank = 0
+    
+    # TensorBoard
+    writer = SummaryWriter(log_dir=args.log_dir) if local_rank == 0 else None
+    
+    # Early Stopping
+    early_stopper = EarlyStopping(patience=args.patience) if args.early_stop else None
+    
+    # Chargement des données
+    dataset = NeuroLiteDataset()
+    train_dataset = prepare_dataset(dataset, tokenizer)
+    
+    if args.distributed:
+        sampler = DistributedSampler(train_dataset)
+    else:
+        sampler = None
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        sampler=sampler,
+        num_workers=args.num_workers
+    )
+    
+    # Entraînement distribué
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model)
+    
+    # Hyperparameter tuning
+    optimizer = AdamW(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        HyperparameterTuner.get_lr_schedule(args.lr, args.warmup_steps, len(train_loader)*args.epochs)
+    )
+    
+    for epoch in range(args.epochs):
+        model.train()
+        for batch in train_loader:
+            outputs = model(**batch)
+            loss = outputs.loss
+            
+            if writer:
+                writer.add_scalar('Loss/train', loss.item(), global_step)
+                
+            # Early stopping
+            if early_stopper and early_stopper(val_loss):
+                print("Early stopping triggered!")
+                break
 
 if __name__ == "__main__":
-    # This guard is important for multiprocessing with num_workers > 0 on Windows
-    main()
+    # Configuration des arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_file", type=str, required=True)
+    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="models/neurolite-pretrained")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.1)
+    parser.add_argument("--test_mode", action="store_true")
+    parser.add_argument("--max_test_steps", type=int, default=100)
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--vocab_size", type=int, default=50000)
+    parser.add_argument("--max_seq_length", type=int, default=512)
+    parser.add_argument("--distributed", action="store_true", help="Activer l'entraînement distribué")
+    parser.add_argument("--early_stop", action="store_true", help="Activer l'early stopping")
+    parser.add_argument("--patience", type=int, default=3, help="Patience pour l'early stopping")
+    parser.add_argument("--log_dir", type=str, default="logs", help="Répertoire pour TensorBoard")
+    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
+    parser.add_argument("--warmup_steps", type=int, default=1000, help="Nombre de pas de warmup")
+    parser.add_argument("--num_workers", type=int, default=4, help="Nombre de workers pour le chargement des données")
+    
+    args = parser.parse_args()
+    
+    # Initialisation
+    logger = TrainingLogger(args.output_dir)
+    logger.log(f"Starting NeuroLite pretraining with args: {args}")
+    
+    # Chargement des données
+    train_dataset, eval_dataset = load_datasets(args.data_dir, args.test_mode)
+    
+    # Chargement du tokenizer
+    tokenizer = load_tokenizer(args)
+    
+    # Préparation des données
+    train_dataset_tok = prepare_dataset(args, tokenizer, train_dataset)
+    eval_dataset_tok = prepare_dataset(args, tokenizer, eval_dataset)
+    
+    # Chargement du modèle
+    model, _ = load_model(args)
+    
+    # Entraînement
+    train_dataloader = DataLoader(train_dataset_tok, batch_size=args.batch_size, shuffle=True)
+    eval_dataloader = DataLoader(eval_dataset_tok, batch_size=args.batch_size)
+    
+    train_model(args, model, tokenizer, train_dataloader, eval_dataloader, logger)
+    
+    logger.log("Training completed successfully!")

@@ -1081,6 +1081,77 @@ class BayesianBeliefNetwork(nn.Module):
 
         return final_probs
 
+    def update(self, new_evidence: torch.Tensor) -> None:
+        """
+        Met à jour le réseau bayésien avec de nouvelles preuves.
+        
+        Args:
+            new_evidence: Tensor de nouvelles preuves [batch_size, num_variables] ou [num_variables]
+                        Les valeurs doivent être entre 0 et 1, où:
+                        - 1.0 indique une preuve positive forte
+                        - 0.0 indique une preuve négative forte
+                        - 0.5 indique une absence de preuve (valeur neutre)
+        
+        Note:
+            Cette méthode met à jour les embeddings des variables en fonction des nouvelles preuves.
+            Elle peut être utilisée pour adapter dynamiquement le réseau à de nouvelles observations.
+        """
+        # S'assurer que new_evidence a la bonne forme [batch_size, num_variables]
+        if new_evidence.dim() == 1:
+            new_evidence = new_evidence.unsqueeze(0)  # [num_variables] -> [1, num_variables]
+        
+        batch_size = new_evidence.size(0)
+        device = new_evidence.device
+        
+        # Convertir les preuves en probabilités si nécessaire
+        evidence_probs = torch.sigmoid(new_evidence) if new_evidence.min() < 0 or new_evidence.max() > 1 else new_evidence
+        
+        # Pour chaque variable, mettre à jour son embedding en fonction des preuves
+        for var_idx in range(self.num_variables):
+            # Obtenir les indices des parents
+            parent_indices = torch.nonzero(self.parents_matrix[var_idx], as_tuple=True)[0]
+            
+            if len(parent_indices) > 0:
+                # Si la variable a des parents, calculer la probabilité conditionnelle attendue
+                # basée sur les preuves des parents
+                parent_evidence = evidence_probs[:, parent_indices]  # [batch_size, num_parents]
+                expected_prob = self._get_conditional_prob(var_idx, parent_evidence, batch_size)
+                
+                # Calculer l'erreur par rapport à la preuve observée
+                target_prob = evidence_probs[:, var_idx]
+                error = target_prob - expected_prob
+                
+                # Mettre à jour l'embedding de la variable en fonction de l'erreur
+                # (c'est une mise à jour heuristique, une approche plus rigoureuse utiliserait
+                #  la rétropropagation du gradient)
+                update = error.unsqueeze(1) * 0.01  # Taux d'apprentissage petit
+                self.variable_embeddings.data[var_idx] += update.mean(dim=0).detach()
+                
+                # Normaliser les embeddings pour éviter l'explosion des valeurs
+                self.variable_embeddings.data = F.normalize(self.variable_embeddings.data, p=2, dim=1)
+        
+        # Mettre à jour également les embeddings des CPTs si nécessaire
+        # (cette partie est optionnelle et peut être ajustée selon les besoins)
+        self.cpt_embeddings.data = F.normalize(self.cpt_embeddings.data, p=2, dim=1)
+    
+    def get_beliefs(self) -> Dict[str, float]:
+        """
+        Retourne les croyances actuelles du réseau bayésien.
+        
+        Returns:
+            Dictionnaire des probabilités marginales pour chaque variable
+        """
+        # Créer un tenseur de preuves neutres (0.5 = pas de preuve)
+        neutral_evidence = torch.full((1, self.num_variables), 0.5, 
+                                    device=next(self.parameters()).device)
+        
+        # Calculer les probabilités marginales avec des preuves neutres
+        with torch.no_grad():
+            marginals = self._infer_probabilities(neutral_evidence)[0]
+        
+        # Convertir en dictionnaire
+        return {f"var_{i}": prob.item() for i, prob in enumerate(marginals)}
+    
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Passage avant dans le réseau bayésien.

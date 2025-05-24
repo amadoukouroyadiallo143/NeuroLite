@@ -1,7 +1,7 @@
 import pytest
 import torch
 from neurolite.symbolic import BayesianBeliefNetwork
-from neurolite.config import NeuroLiteConfig # Assuming this is the correct import path
+from neurolite.Configs.config import NeuroLiteConfig
 
 @pytest.fixture
 def bayesian_config_random():

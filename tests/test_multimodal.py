@@ -1,7 +1,7 @@
 import pytest
 import torch
 from neurolite.multimodal import MultimodalProjection, CrossModalAttention
-from neurolite.config import NeuroLiteConfig # For default values
+from neurolite.Configs.config import NeuroLiteConfig # For default values
 
 # Fixture for MultimodalProjection configuration parameters
 @pytest.fixture

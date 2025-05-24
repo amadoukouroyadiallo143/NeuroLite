@@ -65,6 +65,15 @@ class NeuroLiteConfig:
     continual_adapter_buffer_size: int = 100
     continual_adapter_rate: float = 0.1
     continual_adapter_drift_threshold: float = 0.5
+    continual_adapter_dropout_rate: float = 0.1
+    continual_adapter_num_experts: int = 4
+    continual_adapter_routing_top_k: int = 2
+    continual_adapter_routing_hidden_size: int = 256
+    continual_adapter_routing_activation: str = "gelu"
+    continual_adapter_routing_layer_norm_epsilon: float = 1e-6
+    continual_adapter_routing_activation: str = "gelu"
+    continual_adapter_routing_layer_norm_epsilon: float = 1e-6
+    
 
     # Configuration pour l'entrée multimodale
     use_multimodal_input: bool = False

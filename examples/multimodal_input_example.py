@@ -10,7 +10,7 @@ This script shows how to:
 
 import torch
 from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
+from neurolite.Configs.config import NeuroLiteConfig
 from neurolite.multimodal import MultimodalProjection # For type checking if needed
 
 def run_multimodal_input_example():

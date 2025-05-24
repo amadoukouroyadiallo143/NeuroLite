@@ -12,18 +12,18 @@ import os
 import json
 import time
 
-from .config import NeuroLiteConfig
+from ..Configs.config import NeuroLiteConfig
 from .projection import MinHashBloomProjection, TokenizedMinHashProjection
 from .mixer import MixerLayer, HyperMixer, FNetLayer
-from .memory import DifferentiableMemory, ModernHopfieldLayer
-from .routing import DynamicRoutingBlock
-from .symbolic import NeuralSymbolicLayer, BayesianBeliefNetwork
+from ..memory import DifferentiableMemory, ModernHopfieldLayer
+from ..routers.routing import DynamicRoutingBlock
+from ..symbolic import NeuralSymbolicLayer, BayesianBeliefNetwork
 
 # Imports des nouveaux modules AGI
-from .multimodal import MultimodalProjection, CrossModalAttention
-from .hierarchical_memory import HierarchicalMemory, VectorMemoryStore
-from .continual import ContinualAdapter, ReplayBuffer, ProgressiveCompressor
-from .reasoning import NeurosymbolicReasoner, StructuredPlanner
+from .multimodal.multimodal import MultimodalProjection, CrossModalAttention
+from ..memory.hierarchical_memory import HierarchicalMemory, VectorMemoryStore
+from ..continual.continual import ContinualAdapter, ReplayBuffer, ProgressiveCompressor
+from ..reasoning.reasoning import NeurosymbolicReasoner, StructuredPlanner
 
 
 class NeuroLiteModel(nn.Module):
@@ -209,6 +209,15 @@ class NeuroLiteModel(nn.Module):
             )
         else:
             self.continual_adapter = None
+
+        # Compresseur progressif (optionnel)
+        if getattr(config, 'use_progressive_compression', False):
+            self.progressive_compressor = ProgressiveCompressor(
+                hidden_size=config.hidden_size,
+                compression_ratio=getattr(config, 'compression_ratio', 0.5)
+            )
+        else:
+            self.progressive_compressor = None
 
         # Attention Cross-Modale (optionnelle)
         self.cross_modal_attention_text_image = None

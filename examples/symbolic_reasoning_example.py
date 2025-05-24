@@ -5,7 +5,7 @@ This example shows how to configure the model to include the symbolic reasoning 
 
 import torch
 from neurolite.model import NeuroLiteModel
-from neurolite.config import NeuroLiteConfig
+from neurolite.Configs.config import NeuroLiteConfig
 from neurolite.symbolic import NeuralSymbolicLayer # For type checking
 import os
 

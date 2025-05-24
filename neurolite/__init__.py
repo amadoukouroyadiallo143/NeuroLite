@@ -1,24 +1,22 @@
 """
-NeuroLite: Architecture d'IA universelle légère pour appareils mobiles et embarqués
+NeuroLite - Une architecture d'IA modulaire et évolutive
+
+Ce module implémente une architecture d'IA inspirée des dernières avancées en modèles de séquence,
+avec une attention particulière portée à l'efficacité et à la polyvalence.
 """
 
-# Modèles et configuration de base
-from .model import NeuroLiteModel
-from .config import NeuroLiteConfig
-
-# Modules de mémoire
-from .memory import DifferentiableMemory, ModernHopfieldLayer
-from .hierarchical_memory import HierarchicalMemory, VectorMemoryStore
-
-# Modules de traitement et projection
-from .mixer import MLPBlock, MixerLayer, HyperMixer, FNetLayer
-from .projection import MinHashBloomProjection, TokenizedMinHashProjection
-from .routing import DynamicRoutingBlock, MixtureOfExperts
-
-# Extensions AGI avancées
-from .multimodal import MultimodalProjection, CrossModalAttention
-from .continual import ContinualAdapter, ReplayBuffer, ProgressiveCompressor
+# Import des composants principaux
+from .core.model import NeuroLiteModel
+from .Configs.config import NeuroLiteConfig
 from .reasoning import NeurosymbolicReasoner, StructuredPlanner
-from .symbolic import NeuralSymbolicLayer
 
-__version__ = "0.2.0"  # Mise à jour de la version avec capacités AGI
+# Version du package
+__version__ = "0.1.0"
+
+# Classes et fonctions à exposer au niveau du package
+__all__ = [
+    'NeuroLiteModel',
+    'NeuroLiteConfig',
+    'NeurosymbolicReasoner',
+    'StructuredPlanner',
+]
