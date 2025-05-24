@@ -4,18 +4,37 @@ This example shows how to configure the model to include the symbolic reasoning 
 """
 
 import torch
-from neurolite.model import NeuroLiteModel
-from neurolite.Configs.config import NeuroLiteConfig
-from neurolite.symbolic import NeuralSymbolicLayer # For type checking
 import os
+import sys
+from pathlib import Path
+
+# Ajouter le répertoire parent au chemin Python pour permettre les imports absolus
+sys.path.append(str(Path(__file__).parent.parent))
+
+from neurolite.core.model import NeuroLiteModel
+from neurolite.Configs.config import NeuroLiteConfig
+from neurolite.symbolic.symbolic import NeuralSymbolicLayer  # For type checking
 
 def run_symbolic_reasoning_example():
     print("Starting Symbolic Reasoning Example...")
 
     # 1. Configure the model to use symbolic reasoning.
-    # The base_symbolic() class method provides a default configuration
-    # with the symbolic module enabled and pointing to "rules.json".
-    config = NeuroLiteConfig.base_symbolic()
+    # Check if base_symbolic method exists, otherwise create a base config and enable symbolic module
+    if hasattr(NeuroLiteConfig, 'base_symbolic'):
+        config = NeuroLiteConfig.base_symbolic()
+    else:
+        # Fallback if base_symbolic is not available
+        config = NeuroLiteConfig()
+        config.use_symbolic_module = True
+        config.symbolic_rules_file = "rules.json"
+        config.use_bayesian_module = True
+        config.num_bayesian_variables = 10
+        config.bayesian_network_structure = [(0,1), (1,2)]
+        # Ajout des paramètres nécessaires pour le module symbolique
+        config.hidden_size = 256  # Valeur par défaut pour hidden_size
+        config.max_predicate_types = 50  # Pour le vocabulaire des prédicats
+        config.max_entities_in_vocab = 200  # Pour le vocabulaire des entités
+        config.dropout_rate = 0.1  # Taux de dropout par défaut
 
     # Ensure the default rules file "rules.json" exists.
     # This example assumes "rules.json" is in the project root or a location
@@ -90,11 +109,9 @@ def run_symbolic_reasoning_example():
     # if it's configured and conditions for its activation are met (e.g., if not self.training).
     print("\nProcessing input texts through the model...")
     try:
-        # Using input_texts as per NeuroLiteModel's capability
-        # For models expecting token IDs, ensure tokenizer and input_ids are used.
-        # The base NeuroLiteModel can accept input_texts.
+        # Using multimodal_inputs with 'text' key as expected by NeuroLiteModel
         with torch.no_grad(): # Disable gradient calculations for inference
-            outputs = model(input_texts=sample_texts)
+            outputs = model(multimodal_inputs={'text': sample_texts})
         
         # The 'outputs' will typically be a dictionary. For a 'base' model, it contains 'hidden_states'.
         if isinstance(outputs, dict) and "hidden_states" in outputs:

@@ -152,6 +152,7 @@ class NeuroLiteModel(nn.Module):
             else:
                 # Module symbolique original pour compatibilité
                 self.symbolic = NeuralSymbolicLayer(
+                    config=config,  # Passer la configuration complète
                     hidden_size=config.hidden_size,
                     symbolic_rules_file=config.symbolic_rules_file,
                     dropout_rate=config.dropout_rate
@@ -162,10 +163,8 @@ class NeuroLiteModel(nn.Module):
         # Réseau Bayésien (optionnel)
         if getattr(config, 'use_bayesian_module', False) and getattr(config, 'num_bayesian_variables', 0) > 0:
             self.bayesian_network = BayesianBeliefNetwork(
-                config=config, # Pass the full config
+                config=config,  # Passer la configuration complète
                 hidden_size=config.hidden_size,
-                # num_variables is read from config inside BayesianBeliefNetwork
-                # max_parents is read from config inside BayesianBeliefNetwork
                 dropout_rate=config.dropout_rate
             )
         else:

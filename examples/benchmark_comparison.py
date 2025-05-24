@@ -173,7 +173,7 @@ class SimpleTransformer(nn.Module):
 
 
 @measure_memory_usage
-def run_neurolite(input_size: int, seq_length: int, batch_size: int, device: torch.device) -> Tuple[Dict[str, Any], float]:
+def run_neurolite(input_size: int, seq_length: int, batch_size: int, device: torch.device = None) -> Tuple[Dict[str, Any], float]:
     """
     Exécute et mesure les performances de NeuroLite.
     
@@ -181,11 +181,15 @@ def run_neurolite(input_size: int, seq_length: int, batch_size: int, device: tor
         input_size: Taille de la couche d'entrée
         seq_length: Longueur de la séquence d'entrée
         batch_size: Taille du lot
-        device: Appareil à utiliser (CPU/GPU)
+        device: Appareil à utiliser (CPU/GPU). Si None, utilise le GPU s'il est disponible
         
     Returns:
         Tuple contenant (résultats, utilisation_mémoire)
     """
+    # Utiliser le GPU si disponible et si aucun périphérique n'est spécifié
+    if device is None:
+        device = get_device()
+    
     # Dictionnaire de résultat par défaut
     default_result = {
         "model_name": "NeuroLite",
@@ -197,7 +201,8 @@ def run_neurolite(input_size: int, seq_length: int, batch_size: int, device: tor
         "flops": 0.0,
         "throughput": 0.0,
         "memory_usage": 0.0,
-        "parameters": 0
+        "parameters": 0,
+        "device": str(device)
     }
     
     try:
@@ -281,7 +286,7 @@ def run_neurolite(input_size: int, seq_length: int, batch_size: int, device: tor
         return default_result, 0.0
 
 @measure_memory_usage
-def run_transformer(input_size: int, seq_length: int, batch_size: int, device: torch.device) -> Tuple[Dict[str, Any], float]:
+def run_transformer(input_size: int, seq_length: int, batch_size: int, device: torch.device = None) -> Tuple[Dict[str, Any], float]:
     """
     Exécute et mesure les performances d'un Transformer standard.
     
@@ -289,11 +294,15 @@ def run_transformer(input_size: int, seq_length: int, batch_size: int, device: t
         input_size: Taille de la couche d'entrée
         seq_length: Longueur de la séquence d'entrée
         batch_size: Taille du lot
-        device: Appareil à utiliser (CPU/GPU)
+        device: Appareil à utiliser (CPU/GPU). Si None, utilise le GPU s'il est disponible
         
     Returns:
         Tuple contenant (résultats, utilisation_mémoire)
     """
+    # Utiliser le GPU si disponible et si aucun périphérique n'est spécifié
+    if device is None:
+        device = get_device()
+    
     # Dictionnaire de résultat par défaut
     default_result = {
         "model_name": "Transformer",
@@ -305,7 +314,8 @@ def run_transformer(input_size: int, seq_length: int, batch_size: int, device: t
         "flops": 0.0,
         "throughput": 0.0,
         "memory_usage": 0.0,
-        "parameters": 0
+        "parameters": 0,
+        "device": str(device)
     }
     
     try:
@@ -470,14 +480,14 @@ def sequence_length_scaling_test(models, seq_lengths, batch_size, device):
     
     return results
 
-def measure_flops(model: nn.Module, input_shape: tuple, device: str = 'cuda') -> float:
+def measure_flops(model: nn.Module, input_shape: tuple, device: torch.device = None) -> float:
     """
-    Mesure les FLOPS d'un modèle pour une entrée donnée en utilisant torch.profiler
+    Estime le nombre d'opérations en virgule flottante (FLOPS) pour une passe avant.
     
     Args:
-        model: Le modèle à analyser
+        model: Le modèle PyTorch à évaluer
         input_shape: La forme de l'entrée (batch_size, seq_len, ...)
-        device: L'appareil à utiliser ('cuda' ou 'cpu')
+        device: Appareil à utiliser (CPU/GPU). Si None, utilise le GPU s'il est disponible
         
     Returns:
         Nombre de FLOPS (opérations en virgule flottante)
@@ -485,18 +495,35 @@ def measure_flops(model: nn.Module, input_shape: tuple, device: str = 'cuda') ->
     try:
         from thop import profile, clever_format
         
-        # Créer une entrée factice
-        dummy_input = torch.randn(input_shape).to(device)
+        # Utiliser le GPU si disponible et si aucun périphérique n'est spécifié
+        if device is None:
+            device = get_device()
+        
+        # Créer une entrée factice sur le bon périphérique
+        dummy_input = torch.randn(input_shape, device=device)
+        
+        # Déplacer le modèle sur le même périphérique que l'entrée
+        model = model.to(device)
         
         # Compter les opérations
-        macs, _ = profile(model, inputs=(dummy_input,), verbose=False)
-        flops = macs * 2  # 1 MAC = 2 FLOPS
+        with torch.no_grad():
+            macs, _ = profile(model, inputs=(dummy_input,), verbose=False)
+            flops = macs * 2  # 1 MAC = 2 FLOPS
         
         return flops
         
     except ImportError:
         print("thop n'est pas installé. Installation avec: pip install thop")
         return 0.0
+    except Exception as e:
+        print(f"Erreur lors du calcul des FLOPS: {str(e)}")
+        return 0.0
+
+def get_device() -> torch.device:
+    """
+    Retourne le périphérique à utiliser (GPU si disponible, sinon CPU)
+    """
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def measure_throughput(model_or_func, input_shape: tuple, num_runs: int = 100, warmup: int = 10, 
                       device: torch.device = None, is_func: bool = False, **kwargs) -> float:
@@ -508,13 +535,18 @@ def measure_throughput(model_or_func, input_shape: tuple, num_runs: int = 100, w
         input_shape: La forme de l'entrée (batch_size, seq_len, ...)
         num_runs: Nombre de runs pour la mesure
         warmup: Nombre de runs d'échauffement
-        device: Appareil à utiliser (CPU/GPU)
+        device: Appareil à utiliser (CPU/GPU). Si None, utilise le GPU s'il est disponible
         is_func: Si True, model_or_func est une fonction qui prend des arguments
         **kwargs: Arguments supplémentaires à passer à la fonction si is_func est True
         
     Returns:
         Débit moyen en exemples par seconde
     """
+    # Utiliser le GPU si disponible et si aucun périphérique n'est spécifié
+    if device is None:
+        device = get_device()
+    
+    print(f"Utilisation du dispositif: {device}")
     if is_func:
         # Si c'est une fonction, on l'appelle directement
         model_func = model_or_func
@@ -814,8 +846,15 @@ def run_neurolite_agi(input_size: int, seq_length: int, batch_size: int, device:
 
 def main():
     # Configuration
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Utilisation du dispositif: {device}")
+    device = get_device()
+    print(f"\nUtilisation du dispositif: {device}")
+    
+    # Afficher des informations sur le GPU si disponible
+    if torch.cuda.is_available():
+        print(f"Nom du GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Mémoire GPU totale: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} Go")
+        print(f"Mémoire GPU allouée: {torch.cuda.memory_allocated(0) / 1e9:.2f} Go")
+        print(f"Mémoire GPU réservée: {torch.cuda.memory_reserved(0) / 1e9:.2f} Go")
     
     # Créer le répertoire de résultats s'il n'existe pas
     RESULTS_DIR.mkdir(exist_ok=True, parents=True)
@@ -882,13 +921,23 @@ def main():
                 if not isinstance(result, dict):
                     result = {}
                 
-                # Ajouter des métriques supplémentaires
-                result.update({
+                # Définir les valeurs par défaut pour les clés requises
+                default_result = {
+                    'inference_time': 0.0,
+                    'param_count': 0,
+                    'throughput': 0.0,
+                    'output_shape': 'error',
                     'batch_size': batch_size,
                     'sequence_length': seq_len,
                     'memory_usage': memory,
-                    'parameters': result.get('param_count', 0)
-                })
+                    'parameters': result.get('param_count', 0),
+                    'flops': 0.0,
+                    'device': str(device)
+                }
+                
+                # Mettre à jour avec les valeurs existantes
+                default_result.update(result)
+                result = default_result
                 
                 # Mesurer le débit pour les fonctions de modèle
                 try:
@@ -999,12 +1048,16 @@ def main():
                 
                 all_results.append(result)
                 
-                # Afficher les résultats
+                # Afficher les résultats en gérant les valeurs manquantes
+                inference_time = result.get('inference_time', 0)
+                param_count = result.get('param_count', result.get('parameters', 0))
+                throughput = result.get('throughput', 0)
+                
                 print(f"{model_name} - "
-                      f"Temps: {result.get('inference_time', 'N/A'):.4f}s, "
-                      f"Paramètres: {result.get('param_count', 0):,}, "
+                      f"Temps: {inference_time:.4f}s, "
+                      f"Paramètres: {param_count:,}, "
                       f"Mémoire: {memory:.2f} Mo, "
-                      f"Débit: {result.get('throughput', 'N/A'):.4f} ex/s")
+                      f"Débit: {throughput:.4f} ex/s")
                 
             except Exception as e:
                 print(f"Erreur avec {model_name} (seq_len={seq_len}): {str(e)}")

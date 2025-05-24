@@ -417,7 +417,8 @@ class NeuralSymbolicLayer(nn.Module):
     
     def __init__(
         self,
-        hidden_size: int,
+        config: Any = None,  # Ajout du paramètre config
+        hidden_size: int = 256,  # Valeur par défaut si non spécifiée
         entity_extraction_threshold: float = 0.3,
         max_entities: int = 10,
         symbolic_rules_file: Optional[str] = None,
@@ -425,7 +426,11 @@ class NeuralSymbolicLayer(nn.Module):
     ):
         super().__init__()
         
-        self.hidden_size = hidden_size
+        # Stocker la configuration
+        self.config = config if config is not None else {}
+        
+        # Utiliser la taille cachée de la configuration si disponible, sinon utiliser la valeur par défaut
+        self.hidden_size = getattr(self.config, 'hidden_size', hidden_size)
         self.entity_extraction_threshold = entity_extraction_threshold
         self.max_entities = max_entities
         
@@ -450,9 +455,9 @@ class NeuralSymbolicLayer(nn.Module):
         self.symbolic_integration_dim = self.predicate_embedding_dim + 2 * self.entity_embedding_dim # Example: P_emb + E1_emb + E2_emb
 
         # Nombre maximum de types de prédicats et d'entités uniques à stocker
-        # Ces valeurs pourraient aussi venir de la configuration.
-        self.max_predicate_types = getattr(config, 'max_predicate_types', 50) 
-        self.max_entities_in_vocab = getattr(config, 'max_entities_in_vocab', 200) # Max unique entity strings
+        # Ces valeurs viennent de la configuration passée au constructeur
+        self.max_predicate_types = getattr(self.config, 'max_predicate_types', 50) if hasattr(self, 'config') else 50
+        self.max_entities_in_vocab = getattr(self.config, 'max_entities_in_vocab', 200) if hasattr(self, 'config') else 200 # Max unique entity strings
 
         self.predicate_embedding_table = nn.Embedding(self.max_predicate_types, self.predicate_embedding_dim)
         # Pour les entités, les embeddings sont dérivés par entity_extractor. 
@@ -836,18 +841,19 @@ class BayesianBeliefNetwork(nn.Module):
     
     def __init__(
         self,
-        config: Any, # Using Any to avoid direct NeuroLiteConfig dependency here if run standalone
-        hidden_size: int, # Kept for direct use if config not fully specified
-        # num_variables: int = 10, # Now from config
-        # max_parents: int = 3, # Now from config
+        config: Any = None,  # Rendre le paramètre optionnel
+        hidden_size: int = 256,  # Valeur par défaut
         dropout_rate: float = 0.1
     ):
         super().__init__()
         
-        self.config = config
-        self.hidden_size = hidden_size
-        self.num_variables = getattr(config, 'num_bayesian_variables', 10)
-        self.max_parents = getattr(config, 'max_parents_bayesian', 3) # Added a default config name
+        # Stocker la configuration
+        self.config = config if config is not None else {}
+        
+        # Utiliser les valeurs de la configuration ou les valeurs par défaut
+        self.hidden_size = getattr(self.config, 'hidden_size', hidden_size) if hasattr(self, 'config') else hidden_size
+        self.num_variables = getattr(self.config, 'num_bayesian_variables', 10) if hasattr(self, 'config') else 10
+        self.max_parents = getattr(self.config, 'max_parents_bayesian', 3) if hasattr(self, 'config') else 3
         self.dropout_rate = dropout_rate
 
         # Dimension des embeddings pour les variables et CPTs (doivent être compatibles pour la similarité)
