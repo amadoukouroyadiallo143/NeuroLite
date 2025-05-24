@@ -318,10 +318,14 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     # Potentially add numpy.random.seed(args.seed) and random.seed(args.seed) if used
 
-    # Load dataset
-    print(f"Loading dataset {args.dataset_name} ({args.dataset_config_name})...")
-    raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
-    print(f"Dataset loaded: {raw_datasets}")
+    # Load dataset (tyzhu/wikitext-103-raw-v1-sent-permute-9)
+    print("Loading dataset tyzhu/wikitext-103-raw-v1-sent-permute-9 ...")
+    raw_datasets = load_dataset("tyzhu/wikitext-103-raw-v1-sent-permute-9")
+    # Découpage train/validation (99%/1%)
+    split = raw_datasets["train"].train_test_split(test_size=0.01, seed=args.seed)
+    train_dataset = split["train"]
+    eval_dataset = split["test"]
+    print(f"Dataset loaded: {len(train_dataset)} train, {len(eval_dataset)} validation examples")
 
     # Setup tokenizer
     tokenizer_path = os.path.join(args.output_dir, "tokenizer.json")
@@ -332,31 +336,34 @@ def main():
         tokenizer = train_tokenizer(args, raw_datasets)
     print(f"Tokenizer vocabulary size: {tokenizer.get_vocab_size()}")
 
-    # Prepare dataset for language modeling
+    # Prepare dataset for language modeling (tokenization + grouping)
     print(f"Preparing dataset for language modeling (grouping texts to max_seq_length: {args.max_seq_length})...")
-    # Check if processed dataset exists to save time (optional)
-    # For simplicity, we re-process each time here.
-    train_dataset = prepare_dataset(args, tokenizer, raw_datasets.filter(lambda example, idx: idx < len(raw_datasets['train']), with_indices=True, desc="Filtering train for prepare_dataset"))['train']
-    eval_dataset = prepare_dataset(args, tokenizer, raw_datasets.filter(lambda example, idx: idx < len(raw_datasets['validation']), with_indices=True, desc="Filtering validation for prepare_dataset"))['validation']
+
+    # Adapter prepare_dataset pour fonctionner avec DatasetDict ou Dataset simple
+    train_dataset_tok = prepare_dataset(args, tokenizer, {"train": train_dataset})["train"]
+    eval_dataset_tok = prepare_dataset(args, tokenizer, {"validation": eval_dataset})["validation"]
+
+    print(f"Tokenized train: {len(train_dataset_tok)} examples, eval: {len(eval_dataset_tok)} examples")
 
     # Data collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer)
 
     # DataLoaders
     train_dataloader = DataLoader(
-        train_dataset, 
+        train_dataset_tok, 
         batch_size=args.batch_size, 
         collate_fn=data_collator, 
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True if args.num_workers > 0 and torch.cuda.is_available() else False # pin_memory can speed up CPU to GPU transfer
+        pin_memory=True if torch.cuda.is_available() else False
     )
     eval_dataloader = DataLoader(
-        eval_dataset, 
-        batch_size=args.batch_size, 
+        eval_dataset_tok,
+        batch_size=args.batch_size,
         collate_fn=data_collator,
+        shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True if args.num_workers > 0 and torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False
     )
 
     # Initialize model
