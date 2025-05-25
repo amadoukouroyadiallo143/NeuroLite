@@ -20,7 +20,8 @@ from ..routers.routing import DynamicRoutingBlock
 from ..symbolic import NeuralSymbolicLayer, BayesianBeliefNetwork
 
 # Imports des nouveaux modules AGI
-from .multimodal.multimodal import MultimodalProjection, CrossModalAttention
+from ..multimodal.multimodal import MultimodalProjection, MultimodalGeneration, CrossModalAttention
+from ..tokenization import NeuroLiteTokenizer, TokenizerConfig
 from ..memory.hierarchical_memory import HierarchicalMemory, VectorMemoryStore
 from ..continual.continual import ContinualAdapter, ReplayBuffer, ProgressiveCompressor
 from ..reasoning.reasoning import NeurosymbolicReasoner, StructuredPlanner
@@ -43,18 +44,43 @@ class NeuroLiteModel(nn.Module):
         self.num_labels = num_labels
         self.tokenizer = tokenizer
         
+        # Tokenizer multimodal avancé (si spécifié)
+        self.multimodal_tokenizer = None
+        if tokenizer is not None and isinstance(tokenizer, NeuroLiteTokenizer):
+            self.multimodal_tokenizer = tokenizer
+        
         # Couche de projection d'entrée
         self.multimodal_to_hidden_proj = None
         if getattr(config, 'use_multimodal_input', False):
             multimodal_proj_output_dim = config.multimodal_output_dim if config.multimodal_output_dim > 0 else config.hidden_size
+            
+            # Utilisation du nouveau MultimodalProjection avec encodeurs spécialisés
             self.input_projection = MultimodalProjection(
                 output_dim=multimodal_proj_output_dim,
-                minhash_permutations=config.minhash_num_permutations,
-                bloom_filter_size=config.bloom_filter_size,
-                image_patch_size=config.multimodal_image_patch_size,
-                video_num_sampled_frames=config.multimodal_video_num_sampled_frames,
-                dropout_rate=config.dropout_rate
+                hidden_dim=getattr(config, 'multimodal_hidden_dim', 768),
+                dropout_rate=config.dropout_rate,
+                use_cross_attention=getattr(config, 'use_cross_modal_attention', True),
+                num_attention_heads=getattr(config, 'cross_modal_num_heads', 8),
+                image_size=getattr(config, 'image_size', 224),
+                patch_size=getattr(config, 'multimodal_image_patch_size', 16),
+                max_audio_length_ms=getattr(config, 'max_audio_length_ms', 30000),
+                max_video_frames=getattr(config, 'multimodal_video_num_sampled_frames', 32),
+                max_graph_nodes=getattr(config, 'max_graph_nodes', 32)
             )
+            
+            # Module de génération multimodale
+            self.multimodal_generation = MultimodalGeneration(
+                input_dim=config.hidden_size,
+                hidden_dim=getattr(config, 'multimodal_hidden_dim', 768),
+                dropout_rate=config.dropout_rate,
+                vocab_size=config.vocab_size,
+                image_size=getattr(config, 'image_size', 224),
+                audio_sample_rate=getattr(config, 'audio_sample_rate', 16000),
+                audio_length_ms=getattr(config, 'audio_length_ms', 30000),
+                video_frames=getattr(config, 'multimodal_video_num_sampled_frames', 16),
+                max_graph_nodes=getattr(config, 'max_graph_nodes', 32)
+            )
+            
             if multimodal_proj_output_dim != config.hidden_size:
                 self.multimodal_to_hidden_proj = nn.Linear(multimodal_proj_output_dim, config.hidden_size)
         else:
@@ -254,9 +280,19 @@ class NeuroLiteModel(nn.Module):
         elif task_type == "sequence_labeling" and num_labels is not None:
             # Couche d'étiquetage de séquence
             self.classifier = nn.Linear(config.hidden_size, num_labels)
-        elif task_type == "generation" and tokenizer is not None:
+        elif task_type == "generation":
             # Couche de prédiction pour la génération de texte
-            self.lm_head = nn.Linear(config.hidden_size, len(tokenizer.word_to_idx) if hasattr(tokenizer, 'word_to_idx') else config.vocab_size)
+            vocab_size = config.vocab_size
+            if tokenizer is not None:
+                if hasattr(tokenizer, 'word_to_idx'):
+                    vocab_size = len(tokenizer.word_to_idx)
+                elif hasattr(tokenizer, 'vocab_size'):
+                    vocab_size = tokenizer.vocab_size
+            self.lm_head = nn.Linear(config.hidden_size, vocab_size)
+        elif task_type == "multimodal_generation":
+            # Cas spécial pour la génération multimodale (pas besoin de lm_head supplémentaire)
+            # car le module multimodal_generation s'occupe déjà de la génération
+            pass
         else:
             # Couche de projection générique pour le modèle de base
             self.output_projection = nn.Linear(config.hidden_size, config.hidden_size)
@@ -308,14 +344,11 @@ class NeuroLiteModel(nn.Module):
     
     def forward(
         self,
-        # input_texts: Optional[List[str]] = None, # Removed
-        # input_ids: Optional[torch.Tensor] = None, # Removed
         multimodal_inputs: Optional[Dict[str, Union[List[str], torch.Tensor, None]]] = None,
-        attention_mask: Optional[torch.Tensor] = None, # Still potentially useful for text if part of multimodal_inputs
+        attention_mask: Optional[torch.Tensor] = None, 
         labels: Optional[torch.Tensor] = None,
         update_memory: bool = True,
         output_hidden_states: bool = False,
-        # multimodal_inputs: Optional[Dict[str, torch.Tensor]] = None, # This was the old signature, updated above
         external_facts: Optional[torch.Tensor] = None,
         use_planning: bool = False,
         constraints: Optional[torch.Tensor] = None,
@@ -339,8 +372,16 @@ class NeuroLiteModel(nn.Module):
             Dictionnaire de sorties ou tenseur/tuple selon return_dict et task_type.
         """
         
+        # Vérification des entrées
         if multimodal_inputs is None or not isinstance(multimodal_inputs, dict):
             raise ValueError("`multimodal_inputs` doit être un dictionnaire fourni.")
+        
+        # Utiliser le tokenizer multimodal si disponible
+        if self.multimodal_tokenizer is not None and multimodal_inputs:
+            # Tokenize les entrées multimodales
+            tokenized_inputs = self.multimodal_tokenizer.tokenize(multimodal_inputs)
+            # Mettre à jour multimodal_inputs avec les entrées tokenisées
+            multimodal_inputs.update(tokenized_inputs)
 
         all_hidden_states = [] if output_hidden_states else None
         individual_modality_representations = None # To store outputs from MultimodalProjection
@@ -560,77 +601,104 @@ class NeuroLiteModel(nn.Module):
         
         return outputs
 
-    def save_pretrained(self, save_dir: str):
+    def save_pretrained(self, save_dir: str, lightweight=False, disable_memory=False, disable_adapters=False):
         """
-        Sauvegarde le modèle dans un répertoire.
+        Sauvegarde le modèle dans un répertoire avec des options pour gérer les structures complexes.
         
         Args:
             save_dir: Chemin du répertoire où sauvegarder le modèle
+            lightweight: Si True, sauvegarde uniquement les poids essentiels du modèle
+            disable_memory: Si True, désactive temporairement les composants de mémoire avant la sauvegarde
+            disable_adapters: Si True, désactive temporairement les adaptateurs avant la sauvegarde
         """
-        os.makedirs(save_dir, exist_ok=True)
+        import sys
+        import copy
         
-        # Sauvegarder la configuration
-        config_path = os.path.join(save_dir, "config.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(self.config.__dict__, f, indent=4)
+        # Augmenter temporairement la limite de récursion pour gérer les structures complexes
+        original_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(10000)  # Limite très élevée pour prendre en charge les structures imbriquées
         
-        # Sauvegarder les poids du modèle
-        model_path = os.path.join(save_dir, "model.pt")
-        torch.save(self.state_dict(), model_path)
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Sauvegarder la configuration
+            config_path = os.path.join(save_dir, "config.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config.__dict__, f, indent=4)
+            
+            # Stratégie de sauvegarde en fonction des options
+            if lightweight:
+                # Mode léger: ne sauvegarde que les poids essentiels sans les structures complexes
+                print("Sauvegarde en mode léger (uniquement poids essentiels)...")
+                # Filtrer le state_dict pour ne garder que les poids des couches essentielles
+                state_dict = {k: v for k, v in self.state_dict().items() 
+                             if not any(x in k for x in ['buffer', 'memory.cache', 'adapter.store'])}
+                torch.save(state_dict, os.path.join(save_dir, "model.pt"))
+            else:
+                # Sauvegarde complète avec gestion des modules complexes
+                memory_state = None
+                adapter_state = None
+                
+                # Désactiver temporairement les modules si demandé
+                if disable_memory and hasattr(self, 'memory') and self.memory is not None:
+                    memory_state = copy.deepcopy(self.memory)
+                    if hasattr(self.memory, 'short_term_memory'):
+                        self.memory.short_term_memory = None
+                    if hasattr(self.memory, 'long_term_memory'):
+                        self.memory.long_term_memory = None
+                
+                if disable_adapters and hasattr(self, 'continual_adapter') and self.continual_adapter is not None:
+                    adapter_state = copy.deepcopy(self.continual_adapter)
+                    if hasattr(self.continual_adapter, 'replay_buffer'):
+                        self.continual_adapter.replay_buffer = None
+                
+                # Sauvegarder les poids du modèle
+                model_path = os.path.join(save_dir, "model.pt")
+                state_dict = self.state_dict()
+                torch.save(state_dict, model_path)
+                
+                # Restaurer les modules désactivés
+                if memory_state is not None:
+                    self.memory = memory_state
+                
+                if adapter_state is not None:
+                    self.continual_adapter = adapter_state
+            
+            # Sauvegarder la mémoire persistante séparément (si disponible et non désactivée)
+            if not disable_memory and hasattr(self, 'memory') and self.memory is not None:
+                if hasattr(self.memory, 'save_persistent_memory'):
+                    try:
+                        memory_path = os.path.join(save_dir, "persistent_memory.pt")
+                        self.memory.save_persistent_memory(memory_path)
+                        print(f"Mémoire persistante sauvegardée dans {memory_path}")
+                    except Exception as e:
+                        print(f"Attention: Impossible de sauvegarder la mémoire persistante: {e}")
+            
+            print(f"Modèle sauvegardé avec succès dans {save_dir}")
         
-        # Sauvegarder la mémoire persistante si disponible
-        if hasattr(self, 'memory') and self.memory is not None:
+        except Exception as e:
+            print(f"Erreur lors de la sauvegarde du modèle: {e}")
+            raise
+        
+        finally:
+            # Rétablir la limite de récursion d'origine
+            sys.setrecursionlimit(original_limit)
+            
+        # Sauvegarder la mémoire persistante séparément (si disponible et non désactivée)
+        if not disable_memory and hasattr(self, 'memory') and self.memory is not None:
             if hasattr(self.memory, 'save_persistent_memory'):
-                memory_path = os.path.join(save_dir, "persistent_memory.pt")
-                self.memory.save_persistent_memory(memory_path)
-                print(f"Mémoire persistante sauvegardée dans {memory_path}")
+                try:
+                    memory_path = os.path.join(save_dir, "persistent_memory.pt")
+                    self.memory.save_persistent_memory(memory_path)
+                    print(f"Mémoire persistante sauvegardée dans {memory_path}")
+                except Exception as e:
+                    print(f"Attention: Impossible de sauvegarder la mémoire persistante: {e}")
         
-        print(f"Modèle sauvegardé dans {save_dir}")
-
-    @classmethod
-    def from_pretrained(cls, model_dir: str, task_type: str = None, num_labels: int = None, tokenizer=None) -> "NeuroLiteModel":
-        """
-        Charge un modèle pré-entraîné depuis un répertoire.
-        
-        Args:
-            model_dir: Répertoire contenant le modèle sauvegardé
-            task_type: Type de tâche ('base', 'classification', 'sequence_labeling', 'generation')
-            num_labels: Nombre de classes (pour classification ou étiquetage de séquence)
-            tokenizer: Tokenizer pour la génération de texte
-            
-        Returns:
-            Modèle NeuroLite chargé
-        """
-        # Charger la configuration
-        config_path = os.path.join(model_dir, "config.json")
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_dict = json.load(f)
-        
-        config = NeuroLiteConfig(**config_dict)
-        
-        # Instancier le modèle avec la configuration
-        model = cls(config)
-        
-        # Charger les poids du modèle
-        model_path = os.path.join(model_dir, "model.pt")
-        if not os.path.exists(model_path):
-            # Rétrocompatibilité avec l'ancien format
-            model_path = os.path.join(model_dir, "pytorch_model.bin")
-            
-        model.load_state_dict(torch.load(model_path))
-        
-        # Charger la mémoire persistante si disponible
-        memory_path = os.path.join(model_dir, "persistent_memory.pt")
-        if os.path.exists(memory_path) and hasattr(model, 'memory') and model.memory is not None:
-            if hasattr(model.memory, 'load_persistent_memory'):
-                model.memory.load_persistent_memory(memory_path)
-                print(f"Mémoire persistante chargée depuis {memory_path}")
-        
-        return model
+        print(f"Modèle sauvegardé avec succès dans {save_dir}")
 
     def generate(
         self,
-        input_ids: torch.Tensor,
+        multimodal_inputs: Optional[Dict[str, Union[List[str], torch.Tensor, None]]] = None,
         max_length: int = 100,
         temperature: float = 1.0,
         top_k: int = 50,
@@ -640,26 +708,29 @@ class NeuroLiteModel(nn.Module):
         repetition_penalty: float = 1.0,
         pad_token_id: int = 0,
         eos_token_id: int = None,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        attention_mask: Optional[torch.Tensor] = None,
+        target_modalities: Optional[List[str]] = None
+    ) -> Union[torch.Tensor, Dict[str, Any]]:
         """
-        Génère du texte à partir des indices d'entrée.
+        Génère des sorties (texte, image, audio, vidéo, graphe) à partir d'entrées.
         
         Args:
-            input_ids: Tensor d'indices de tokens [batch_size, seq_length]
-            max_length: Longueur maximale de la séquence générée
+            multimodal_inputs: Dictionnaire d'entrées multimodales.
+            max_length: Longueur maximale de la séquence générée (pour texte)
             temperature: Température pour l'échantillonnage (plus élevée = plus aléatoire)
-            top_k: Nombre de tokens les plus probables à considérer pour l'échantillonnage
-            top_p: Probabilité cumulative pour l'échantillonnage nucleus
+            top_k: Nombre de tokens les plus probables à considérer pour l'échantillonnage (texte)
+            top_p: Probabilité cumulative pour l'échantillonnage nucleus (texte)
             do_sample: Si True, échantillonne selon les probabilités, sinon prend le token le plus probable
             num_beams: Nombre de faisceaux pour beam search (1 = pas de beam search)
-            repetition_penalty: Pénalité pour la répétition des mêmes tokens
-            pad_token_id: ID du token de padding
-            eos_token_id: ID du token de fin de séquence
-            attention_mask: Masque d'attention pour l'entrée
+            repetition_penalty: Pénalité pour la répétition des mêmes tokens (texte)
+            pad_token_id: ID du token de padding (texte)
+            eos_token_id: ID du token de fin de séquence (texte)
+            attention_mask: Masque d'attention pour l'entrée (texte)
+            target_modalities: Liste des modalités à générer (pour génération multimodale)
             
         Returns:
-            Tensor des indices générés [batch_size, max_length]
+            Pour texte: Tensor des indices générés [batch_size, max_length]
+            Pour multimodal: Dictionnaire contenant les sorties générées par modalité
         """
         # Vérifier que le modèle est configuré pour la génération
         if self.task_type != "generation" or not hasattr(self, 'lm_head'):
@@ -670,22 +741,76 @@ class NeuroLiteModel(nn.Module):
         if eos_token_id is None and self.tokenizer is not None and hasattr(self.tokenizer, 'special_tokens'):
             eos_token_id = self.tokenizer.special_tokens.get('<EOS>', None)
         
+        # Vérifier si nous sommes en mode génération multimodale
+        if self.task_type == "multimodal_generation" and hasattr(self, 'multimodal_generation') and multimodal_inputs is not None:
+            # Encoder les entrées multimodales
+            hidden_states = self.forward(multimodal_inputs=multimodal_inputs, output_hidden_states=False)
+            
+            # Si c'est un dictionnaire (retour de forward avec return_dict=True)
+            if isinstance(hidden_states, dict):
+                hidden_states = hidden_states.get('hidden_states', None)
+            
+            # Générer les sorties multimodales
+            if hidden_states is not None:
+                return self.multimodal_generation(
+                    hidden_states,
+                    target_modalities=target_modalities,
+                    temperature=temperature
+                )
+            else:
+                raise ValueError("Échec de l'encodage des entrées multimodales.")
+        
+        # Génération de texte classique
+        if multimodal_inputs is None:
+            raise ValueError("multimodal_inputs doit être fourni pour la génération.")
+        
+        # Préparer un dictionnaire pour le forward
+        inputs_for_forward = {"input_ids": None}
+        if "text" in multimodal_inputs:
+            inputs_for_forward["text"] = multimodal_inputs["text"]
+        elif "input_ids" in multimodal_inputs:
+            inputs_for_forward["input_ids"] = multimodal_inputs["input_ids"]
+        
+        # Encoder les entrées
+        outputs = self.forward(multimodal_inputs=inputs_for_forward, attention_mask=attention_mask)
+        if isinstance(outputs, dict):
+            hidden_states = outputs.get('hidden_states')
+            if hidden_states is None:
+                raise ValueError("Impossible de récupérer les hidden_states pour la génération.")
+            
+            # Utiliser les sorties pour la génération (approche simplifiée)
+            logits = self.lm_head(hidden_states[:, -1, :])  # Utiliser le dernier token pour prédire
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(-1)
+            input_ids = next_token
+        else:
+            raise ValueError("La sortie du forward n'est pas un dictionnaire comme attendu.")
+        
+        # Vérification des entrées pour la génération de texte
+        if input_ids is None:
+            raise ValueError("input_ids ou multimodal_inputs avec 'text'/'input_ids' doit être fourni pour la génération de texte.")
+        
+        batch_size = input_ids.size(0)
         device = input_ids.device
-        batch_size = input_ids.shape[0]
         
-        # Initialiser les séquences générées avec les entrées
-        generated = input_ids.clone()
+        # Longueurs des séquences d'entrée et sortie
+        cur_len = input_ids.size(1)
+        max_len = max_length
         
-        # Pour le beam search
+        # Valeur par défaut pour eos_token_id si non spécifié
+        if eos_token_id is None:
+            eos_token_id = -1  # Token non utilisé
+        
+        # Utiliser beam search si num_beams > 1
         if num_beams > 1:
-            return self._generate_beam_search(input_ids, max_length, num_beams, 
-                                            pad_token_id, eos_token_id, attention_mask)
+            return self._generate_beam_search(
+                input_ids, max_length, num_beams, pad_token_id, eos_token_id, attention_mask
+            )
             
         # Génération auto-régressive token par token
         with torch.no_grad():
             for _ in range(max_length - input_ids.shape[1]):
                 # Calculer les logits pour la position actuelle
-                outputs = self.forward(input_ids=generated, attention_mask=attention_mask)
+                outputs = self.forward(input_ids=input_ids, attention_mask=attention_mask)
                 logits = outputs["logits"]
                 
                 # Prendre les logits de la dernière position

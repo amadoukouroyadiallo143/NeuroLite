@@ -32,6 +32,7 @@ class NeuroLiteConfig:
     memory_size: int = 64  # Nombre de slots de mémoire (générique, peut-être pour une mémoire simple)
     memory_dim: int = 256  # Dimension de chaque slot (générique)
     memory_update_rate: float = 0.1  # Taux de mise à jour de la mémoire (générique)
+    memory_levels: int = 3  # Nombre de niveaux dans la hiérarchie de mémoire
 
     # Configuration spécifique pour la mémoire hiérarchique
     use_hierarchical_memory: bool = True # True si la mémoire externe est hiérarchique
@@ -77,6 +78,9 @@ class NeuroLiteConfig:
 
     # Configuration pour l'entrée multimodale
     use_multimodal_input: bool = False
+    use_cross_modal_attention: bool = True  # Active l'attention croisée entre modalités
+    cross_modal_num_heads: int = 8        # Nombre de têtes d'attention pour l'attention cross-modale
+    multimodal_hidden_dim: int = 768       # Dimension cachée pour les projections multimodales
     multimodal_output_dim: int = 0 # Si 0, utilise hidden_size. Sinon, cette dimension spécifique.
     multimodal_image_patch_size: int = 16
     multimodal_video_num_sampled_frames: int = 5
