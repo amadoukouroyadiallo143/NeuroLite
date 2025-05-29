@@ -12,10 +12,11 @@ Une architecture universelle d'IA légère pour les appareils mobiles et embarqu
 - **Efficacité Computationnelle**: Complexité linéaire (O(n)) en longueur de séquence vs quadratique (O(n²)) 
 - **Mémoire Adaptative**: Système de rétention contextuelle à long terme inspiré des réseaux de Hopfield modernes
 - **Tokenizer Multimodal**: Système de tokenization avancé avec double codebook pour caractéristiques sémantiques et détaillées
+- **Noyau Latent Universel**: Espace de représentation unifié pour toutes les modalités, permettant une intégration et une transformation fluides entre différents types de données
 - **Encodeurs Spécialisés**: Modules dédiés pour le traitement de texte, image, audio, vidéo et graphes
+- **Générateurs Multimodaux**: Capacité à générer des sorties dans différentes modalités à partir d'un espace latent commun
 - **Routage Intelligent**: Activation conditionnelle des experts spécialisés selon le type d'entrée
 - **Composant Symbolique**: Module léger de raisonnement structuré pour améliorer les capacités symboliques
-- **Génération Multimodale**: Capacité à générer des sorties dans diverses modalités
 - **Mobile-First**: Conçu pour fonctionner efficacement sur smartphones, wearables et dispositifs IoT
 
 ## 📝️ Architecture
@@ -155,6 +156,72 @@ pip install -r requirements.txt
 
 ## 🔧 Utilisation
 
+### Noyau Latent Universel
+
+Le noyau latent de NeuroLite permet de projeter et de transformer des représentations entre différentes modalités :
+
+```python
+from neurolite import NeuroLiteModel, NeuroLiteConfig
+import torch
+
+# Créer un modèle avec support multimédia
+config = NeuroLiteConfig.small()
+config.use_multimodal_input = True
+model = NeuroLiteModel(config, task_type="multimodal_generation")
+
+# Charger des données multimodales (exemple simplifié)
+multimodal_inputs = {
+    "text": ["Un chat noir sur un canapé"],
+    "image": torch.randn(1, 3, 224, 224)  # Exemple d'image
+}
+
+# Obtenir les représentations latentes
+with torch.no_grad():
+    outputs = model.forward(
+        multimodal_inputs=multimodal_inputs,
+        output_hidden_states=True,
+        return_dict=True
+    )
+    
+# Les représentations latentes sont disponibles dans outputs['all_hidden_states']
+print(f"Taille des états cachés: {outputs['all_hidden_states'][-1].shape}")
+
+# Visualisation des représentations latentes (nécessite matplotlib)
+import matplotlib.pyplot as plt
+latents = outputs['all_hidden_states'][-1].mean(dim=1).cpu().numpy()
+plt.figure(figsize=(10, 5))
+plt.imshow(latents, aspect='auto', cmap='viridis')
+plt.colorbar(label="Valeur d'activation")
+plt.title("Représentations Latentes")
+plt.xlabel("Dimension")
+plt.ylabel("Exemple")
+plt.show()
+```
+
+### Génération Multimodale
+
+Générez du contenu dans différentes modalités à partir d'entrées multimodales :
+
+```python
+# Générer à partir d'une entrée multimodale
+generated_outputs = model.generate(
+    multimodal_inputs=multimodal_inputs,
+    target_modalities=["text", "image"],  # Générer du texte et une image
+    max_length=50,  # Pour la génération de texte
+    temperature=0.7
+)
+
+# Accéder aux sorties générées
+if "generated_text" in generated_outputs:
+    print("Texte généré:", generated_outputs["generated_text"])
+    
+if "generated_image" in generated_outputs:
+    # Afficher ou sauvegarder l'image générée
+    plt.imshow(generated_outputs["generated_image"][0].permute(1, 2, 0).cpu().numpy())
+    plt.axis('off')
+    plt.show()
+```
+
 ### Exemple Simple
 
 ```python
@@ -170,20 +237,6 @@ outputs = model(input_texts=texts)
 
 # Utiliser les représentations vectorielles (embeddings)
 embedding = outputs.mean(dim=1)
-```
-
-### Classification de Texte
-
-```python
-from neurolite import NeuroLiteForClassification, NeuroLiteConfig
-
-# Configurer un modèle pour classification
-config = NeuroLiteConfig.small()
-model = NeuroLiteForClassification(config, num_labels=2)
-
-# Inférence
-outputs = model(input_texts=["Texte à classifier"])
-prediction = outputs["logits"].argmax(dim=1)
 ```
 
 ### Utilisation de la Mémoire Contextuelle

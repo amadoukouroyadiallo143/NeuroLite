@@ -24,82 +24,142 @@ class HierarchicalMemory(nn.Module):
     def __init__(
         self,
         config: NeuroLiteConfig,
-        hidden_size: int = 256,
-        short_term_size: int = 64,
-        long_term_size: int = 256,
-        persistent_size: int = 512,
+        hidden_size: Optional[int] = None,
+        short_term_size: Optional[int] = None,
+        long_term_size: Optional[int] = None,
+        persistent_size: Optional[int] = None,
         key_size: Optional[int] = None,
         value_size: Optional[int] = None,
-        short_term_update_rate: float = 0.9,  # Mise à jour rapide
-        long_term_update_rate: float = 0.1,   # Mise à jour plus lente
-        persistent_update_rate: float = 0.01,  # Très lente
-        attention_heads: int = 4,
-        dropout_rate: float = 0.1,
-        memory_forgetting_scale: float = 0.99  # Facteur d'oubli graduel
+        short_term_update_rate: Optional[float] = None,
+        long_term_update_rate: Optional[float] = None,
+        persistent_update_rate: Optional[float] = None,
+        attention_heads: Optional[int] = None,
+        dropout_rate: Optional[float] = None,
+        memory_forgetting_scale: Optional[float] = None
     ):
+        """
+        Initialise la mémoire hiérarchique.
+        
+        Args:
+            config: Configuration complète du modèle
+            hidden_size: Dimension des représentations cachées
+            short_term_size: Taille de la mémoire à court terme
+            long_term_size: Taille de la mémoire à long terme
+            persistent_size: Taille de la mémoire persistante
+            key_size: Dimension des clés d'attention
+            value_size: Dimension des valeurs stockées
+            short_term_update_rate: Taux de mise à jour court terme
+            long_term_update_rate: Taux de mise à jour long terme
+            persistent_update_rate: Taux de mise à jour persistant
+            attention_heads: Nombre de têtes d'attention
+            dropout_rate: Taux de dropout
+            memory_forgetting_scale: Facteur d'oubli graduel
+        """
+        super().__init__()
+        
+        # Récupération des paramètres depuis la configuration
+        self.config = config
+        memory_config = config.memory_config if hasattr(config, 'memory_config') else {}
+        
+        # Valeurs par défaut depuis la configuration
+        self.hidden_size = hidden_size or getattr(memory_config, 'hidden_size', 256)
+        short_term_size = short_term_size or getattr(memory_config, 'short_term_memory_size', 64)
+        long_term_size = long_term_size or getattr(memory_config, 'long_term_memory_size', 256)
+        persistent_size = persistent_size or getattr(memory_config, 'persistent_memory_size', 512)
+        
+        # Taux de mise à jour
+        self.short_term_update_rate = short_term_update_rate or getattr(memory_config, 'short_term_update_rate', 0.9)
+        self.long_term_update_rate = long_term_update_rate or getattr(memory_config, 'long_term_update_rate', 0.1)
+        self.persistent_update_rate = persistent_update_rate or getattr(memory_config, 'persistent_update_rate', 0.01)
+        
+        # Autres paramètres
+        self.attention_heads = attention_heads or getattr(memory_config, 'num_attention_heads', 4)
+        self.dropout_rate = dropout_rate or getattr(memory_config, 'dropout_rate', 0.1)
+        self.memory_forgetting_scale = memory_forgetting_scale or getattr(memory_config, 'memory_forgetting_scale', 0.99)
+        
+        # Seuils de nouveauté
+        self.novelty_threshold_ltm = getattr(memory_config, 'novelty_threshold_ltm', 0.5)
+        self.novelty_threshold_pm = getattr(memory_config, 'novelty_threshold_pm', 0.6)
         super().__init__()
         
         self.hidden_size = hidden_size
         
         # Déterminer les dimensions des clés/valeurs
-        if key_size is None:
-            key_size = hidden_size
-        if value_size is None:
-            value_size = hidden_size
-            
+        self.key_size = key_size or self.hidden_size
+        self.value_size = value_size or self.hidden_size
+        
         # Mémoire à court terme (quelques contextes récents)
         self.short_term_memory = DifferentiableMemory(
-            hidden_size=hidden_size,
+            hidden_size=self.hidden_size,
             memory_size=short_term_size,
-            key_size=key_size,
-            value_size=value_size,
-            update_rate=short_term_update_rate
+            key_size=self.key_size,
+            value_size=self.value_size,
+            update_rate=self.short_term_update_rate,
+            num_heads=self.attention_heads,
+            dropout_rate=self.dropout_rate
         )
         
         # Mémoire à long terme (contexte conversationnel)
         self.long_term_memory = DifferentiableMemory(
-            hidden_size=hidden_size,
+            hidden_size=self.hidden_size,
             memory_size=long_term_size,
-            key_size=key_size,
-            value_size=value_size,
-            update_rate=long_term_update_rate
+            key_size=self.key_size,
+            value_size=self.value_size,
+            update_rate=self.long_term_update_rate,
+            num_heads=self.attention_heads,
+            dropout_rate=self.dropout_rate
         )
         
         # Mémoire persistante (connaissances durables, partagées entre sessions)
         self.persistent_memory = VectorMemoryStore(
-            hidden_size=hidden_size,
+            hidden_size=self.hidden_size,
             memory_size=persistent_size,
-            value_size=value_size,
-            update_rate=persistent_update_rate
+            key_size=self.key_size,
+            value_size=self.value_size,
+            update_rate=self.persistent_update_rate,
+            similarity_threshold=self.novelty_threshold_pm
         )
         
         # Projections pour les requêtes aux différentes mémoires
-        self.query_projection = nn.Linear(hidden_size, hidden_size)
+        self.query_projection = nn.Linear(self.hidden_size, self.hidden_size)
         
         # Mémoire de travail (meta-mémoire pour combiner les autres)
         self.memory_gate = nn.Sequential(
-            nn.Linear(hidden_size, 3),  # Importance relative de chaque mémoire
+            nn.Linear(self.hidden_size, 3),  # Importance relative de chaque mémoire
             nn.Softmax(dim=-1)
         )
         
         # Mécanisme d'attention multi-tête pour intégrer les mémoires
         self.memory_attention = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=attention_heads,
-            dropout=dropout_rate,
-            batch_first=True
+            embed_dim=self.hidden_size,
+            num_heads=self.attention_heads,
+            dropout=self.dropout_rate,
+            batch_first=True,
+            device=config.device if hasattr(config, 'device') else 'cuda'
         )
         
         # Projection de sortie
-        self.output_projection = nn.Linear(hidden_size, hidden_size)
+        self.output_projection = nn.Linear(self.hidden_size, self.hidden_size)
         
         # Facteur d'oubli pour simuler une mémoire réaliste
-        self.forgetting_scale = memory_forgetting_scale
         self.register_buffer('last_access_time', torch.zeros(1))
-
-        # Seuil de nouveauté pour la consolidation (configurable si besoin)
-        self.novelty_threshold_ltm = getattr(config, 'novelty_threshold_ltm', 0.5) # Example threshold
-        self.novelty_threshold_pm = getattr(config, 'novelty_threshold_pm', 0.6)  # Example threshold
+        
+        # Initialisation des poids
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialise les poids des couches linéaires."""
+        for module in [self.query_projection, self.output_projection]:
+            if hasattr(module, 'weight') and module.weight is not None:
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        
+        # Initialisation spécifique pour la couche de gate
+        if hasattr(self.memory_gate[0], 'weight'):
+            nn.init.orthogonal_(self.memory_gate[0].weight)
+            if hasattr(self.memory_gate[0], 'bias') and self.memory_gate[0].bias is not None:
+                nn.init.constant_(self.memory_gate[0].bias, 0.1)
         
     def search(self, query_embedding: torch.Tensor, k: int = 3) -> Dict[str, List[Tuple[float, torch.Tensor]]]:
         """

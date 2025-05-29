@@ -2,27 +2,33 @@
 Tokenizer multimodal avancé pour l'architecture NeuroLite.
 
 Ce module implémente un tokenizer multimodal sophistiqué qui étend les capacités
-des projections multimodales existantes avec une tokenization à double codebook
-et une architecture hiérarchique pour unifier la compréhension et la génération.
+des projections multimodales existantes avec une tokenization hiérarchique
+et une architecture à plusieurs niveaux pour une représentation unifiée.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, TypeVar
 
-from ..multimodal.multimodal import MultimodalProjection, CrossModalAttention
-from .config import TokenizerConfig
+from ..Configs.config import TokenizerConfig, BaseConfig
+from ..multimodal.encoders import (
+    TextEncoder, ImageEncoder, AudioEncoder,
+    VideoEncoder, GraphEncoder
+)
 from .quantizers import VectorQuantizer, ResidualVQ
+from .hierarchical import HierarchicalTokenizer
+
+# Type variable pour les configurations
+T = TypeVar('T', bound='BaseConfig')
 
 
 class NeuroLiteTokenizer(nn.Module):
     """
     Tokenizer multimodal avancé pour NeuroLite.
     
-    Étend les capacités de projection multimodale existantes avec une
-    tokenization à double codebook (sémantique et détaillée) pour
-    unifier efficacement la compréhension et la génération.
+    Implémente une tokenization hiérarchique avec des codebooks multiples
+    pour une représentation unifiée des différentes modalités.
     """
     
     def __init__(self, config: TokenizerConfig):
@@ -35,19 +41,23 @@ class NeuroLiteTokenizer(nn.Module):
         super().__init__()
         self.config = config
         
-        # Utiliser la projection multimodale existante comme encodeur de base
-        self.multimodal_projection = MultimodalProjection(
-            output_dim=config.hidden_size,
-            hidden_dim=config.hidden_size,
-            dropout_rate=config.dropout_rate,
-            use_cross_attention=config.use_context_modulation,
-            num_attention_heads=config.num_alignment_heads,
-            image_size=config.vision_encoder_config.image_size,
-            patch_size=config.vision_encoder_config.patch_size,
-            max_audio_length_ms=config.audio_encoder_config.max_audio_length_ms,
-            max_video_frames=config.video_encoder_config.num_frames,
-            max_graph_nodes=config.graph_encoder_config.max_num_nodes
-        )
+        # Encodeurs spécifiques à chaque modalité
+        self.encoders = nn.ModuleDict({
+            'text': TextEncoder(config.text_encoder_config),
+            'image': ImageEncoder(config.vision_encoder_config),
+            'audio': AudioEncoder(config.audio_encoder_config),
+            'video': VideoEncoder(config.video_encoder_config),
+            'graph': GraphEncoder(config.graph_encoder_config)
+        })
+        
+        # Projection des modalités vers l'espace latent commun
+        self.modality_projections = nn.ModuleDict({
+            mod: nn.Linear(
+                config.modality_dims[mod],
+                config.hidden_size
+            )
+            for mod in config.modality_dims
+        })
         
         # Attention intermodale pour l'alignement
         self.cross_modal_attention = CrossModalAttention(
@@ -100,7 +110,7 @@ class NeuroLiteTokenizer(nn.Module):
         # Projecteur de sortie
         self.output_projection = nn.Linear(config.hidden_size, config.hidden_size)
     
-    def encode_multimodal(self, inputs: Dict[str, Union[List[str], torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def encode_multimodal(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """
         Encode les entrées multimodales en représentations intermédiaires.
         
@@ -110,25 +120,19 @@ class NeuroLiteTokenizer(nn.Module):
         Returns:
             Dictionnaire des représentations encodées par modalité
         """
-        # Utiliser la projection multimodale existante pour traiter toutes les modalités
-        # La méthode forward de MultimodalProjection peut retourner les représentations individuelles
-        _, encoded_features = self.multimodal_projection(inputs, return_individual_modalities=True)
+        encoded_features = {}
         
-        # Si aucune modalité n'est présente, initialiser avec un dictionnaire vide
-        if not encoded_features:
-            encoded_features = {}
-            
-            # Créer des tenseurs vides pour chaque modalité possible si nécessaire
-            device = next(self.parameters()).device
-            batch_size = 1  # Par défaut
-            if 'text' in inputs and inputs['text']:
-                batch_size = len(inputs['text']) if isinstance(inputs['text'], list) else inputs['text'].shape[0]
-            elif 'image' in inputs and inputs['image'] is not None:
-                batch_size = inputs['image'].shape[0]
+        # Traiter chaque modalité avec son encodeur dédié
+        for modality, encoder in self.encoders.items():
+            if modality in inputs and inputs[modality] is not None:
+                # Encoder la modalité
+                features = encoder(inputs[modality])
                 
-            for modality in ['text', 'image', 'audio', 'video', 'graph']:
-                if modality in inputs and inputs[modality] is not None:
-                    encoded_features[modality] = torch.zeros((batch_size, self.config.hidden_size), device=device)
+                # Projeter dans l'espace latent commun
+                if modality in self.modality_projections:
+                    features = self.modality_projections[modality](features)
+                
+                encoded_features[modality] = features
         
         return encoded_features
     
@@ -144,40 +148,53 @@ class NeuroLiteTokenizer(nn.Module):
         """
         modalities = list(encoded_features.keys())
         
+        if not modalities:
+            raise ValueError("Aucune modalité valide fournie pour l'alignement")
+            
         if len(modalities) == 1:
-            # Une seule modalité, pas besoin d'alignement
+            # Une seule modalité, pas besoin d'alignement complexe
             return list(encoded_features.values())[0]
         
-        # Pour plusieurs modalités, utiliser l'attention intermodale
-        aligned_features = {}
+        # Pour plusieurs modalités, utiliser une attention croisée
+        batch_size = next(iter(encoded_features.values())).shape[0]
+        device = next(iter(encoded_features.values())).device
         
-        # Pour chaque paire de modalités, calculer l'attention croisée
-        for src_mod in modalities:
-            aligned_mod_features = encoded_features[src_mod].clone()
+        # Initialiser avec la moyenne des caractéristiques
+        combined_features = torch.stack(list(encoded_features.values())).mean(dim=0)
+        
+        # Appliquer plusieurs couches d'attention croisée
+        for _ in range(self.config.num_alignment_heads):
+            # Mise à jour itérative des caractéristiques
+            updated_features = []
             
-            for tgt_mod in modalities:
-                if src_mod != tgt_mod:
-                    # Appliquer l'attention croisée entre les modalités
-                    cross_attended = self.cross_modal_attention(
-                        query_modality=encoded_features[src_mod],
-                        key_value_modality=encoded_features[tgt_mod]
-                    )
-                    
-                    # Mettre à jour les caractéristiques alignées
-                    aligned_mod_features = aligned_mod_features + cross_attended
+            for mod in modalities:
+                # Calculer l'attention par rapport aux autres modalités
+                query = encoded_features[mod]
+                keys = torch.cat([
+                    encoded_features[m] for m in modalities if m != mod
+                ], dim=0)
+                
+                # Attention multi-têtes
+                attention_weights = F.softmax(
+                    torch.matmul(query, keys.transpose(-2, -1)) / (self.config.hidden_size ** 0.5),
+                    dim=-1
+                )
+                
+                # Mise à jour pondérée
+                attended = torch.matmul(attention_weights, keys)
+                updated_features.append(attended)
             
-            aligned_features[src_mod] = aligned_mod_features
+            # Mettre à jour les caractéristiques encodées
+            for i, mod in enumerate(modalities):
+                encoded_features[mod] = self.modality_projections[mod](
+                    encoded_features[mod] + updated_features[i]
+                )
         
-        # Combiner toutes les caractéristiques alignées (moyenne simple pour l'instant)
-        combined_features = torch.stack(list(aligned_features.values())).mean(dim=0)
-        
-        # Normaliser et projeter
-        combined_features = self.post_attention_norm(combined_features)
-        combined_features = self.post_attention_projection(combined_features)
-        
+        # Combinaison finale
+        combined_features = torch.stack(list(encoded_features.values())).mean(dim=0)
         return combined_features
     
-    def tokenize(self, inputs: Dict[str, Union[List[str], torch.Tensor]]) -> Dict[str, Any]:
+    def tokenize(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Tokenize les entrées multimodales en tokens discrets.
         
@@ -187,56 +204,42 @@ class NeuroLiteTokenizer(nn.Module):
         Returns:
             Dictionnaire contenant les tokens et indices des codebooks
         """
+        # Vérifier les entrées
+        if not any(mod in inputs for mod in self.config.modality_dims):
+            raise ValueError("Aucune entrée valide fournie. Les modalités supportées sont: "
+                          f"{list(self.config.modality_dims.keys())}")
+        
         # Encoder les entrées multimodales
-        encoded_features = self.encode_multimodal(inputs)
-        
-        # Aligner les modalités
-        aligned_features = self.align_modalities(encoded_features)
-        
-        # Tokenization par le codebook sémantique
-        semantic_tokens, semantic_indices, semantic_commitment_loss = self.semantic_codebook(aligned_features)
-        
-        # Tokenization par le codebook détaillé
-        detail_tokens, detail_indices, detail_commitment_loss = self.detail_codebook(aligned_features)
-        
-        # Combiner les tokens sémantiques et détaillés
-        combined_tokens = torch.cat([semantic_tokens, detail_tokens], dim=-1)
-        refined_tokens = self.codebook_refinement(combined_tokens)
-        
-        # Quantification résiduelle pour compression
-        quantized, residual_indices, residual_commitment_loss = self.residual_quantizer(refined_tokens)
-        
-        # Projection finale
-        output_tokens = self.output_projection(quantized)
-        
-        # Calculer la perte totale de quantification vectorielle
-        vq_loss = semantic_commitment_loss + detail_commitment_loss + residual_commitment_loss
-        
-        # Calculer une perte d'alignement pour les fonctionnalités cross-modales
-        alignment_loss = self._compute_alignment_loss(encoded_features) if len(encoded_features) > 1 else 0.0
-        
-        return {
-            # Tokens et indices
-            'semantic_tokens': semantic_tokens,
-            'semantic_indices': semantic_indices,
-            'detail_tokens': detail_tokens,
-            'detail_indices': detail_indices,
-            'refined_tokens': refined_tokens,
-            'residual_indices': residual_indices,
-            'output_tokens': output_tokens,
+        with torch.no_grad():
+            encoded_features = self.encode_multimodal(inputs)
             
-            # Caractéristiques extraites
-            'encoded_features': encoded_features,
-            'aligned_features': aligned_features,
+            # Aligner les modalités
+            aligned_features = self.align_modalities(encoded_features)
             
-            # Pertes pour l'entraînement
-            'vq_loss': vq_loss,
-            'semantic_commitment_loss': semantic_commitment_loss,
-            'detail_commitment_loss': detail_commitment_loss,
-            'residual_commitment_loss': residual_commitment_loss,
-            'alignment_loss': alignment_loss,
-            'commitment_loss': semantic_commitment_loss + detail_commitment_loss + residual_commitment_loss
-        }
+            # Appliquer la quantification hiérarchique
+            if hasattr(self, 'hierarchical_quantizer'):
+                tokens, indices, losses = self.hierarchical_quantizer(aligned_features)
+                return {
+                    'tokens': tokens,
+                    'indices': indices,
+                    'losses': losses
+                }
+            
+            # Tokenization par les codebooks sémantique et détaillé
+            semantic_tokens, semantic_indices, semantic_loss = self.semantic_codebook(aligned_features)
+            detail_tokens, detail_indices, detail_loss = self.detail_codebook(aligned_features)
+            
+            # Calculer la perte totale
+            total_loss = semantic_loss + detail_loss
+            
+            return {
+                'semantic_tokens': semantic_tokens,
+                'semantic_indices': semantic_indices,
+                'detail_tokens': detail_tokens,
+                'detail_indices': detail_indices,
+                'loss': total_loss,
+                'aligned_features': aligned_features
+            }
         
     def _compute_alignment_loss(self, encoded_features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """

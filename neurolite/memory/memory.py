@@ -28,7 +28,9 @@ class DifferentiableMemory(nn.Module):
         key_size: Optional[int] = None,
         value_size: Optional[int] = None,
         update_rate: float = 0.1,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        num_heads: int = 4,
+        dropout_rate: float = 0.1
     ):
         super().__init__()
         
@@ -38,6 +40,8 @@ class DifferentiableMemory(nn.Module):
         self.value_size = value_size or hidden_size
         self.update_rate = update_rate  # Taux de mise à jour de la mémoire
         self.temperature = temperature  # Temperature pour le softmax d'adressage
+        self.num_heads = num_heads  # Nombre de têtes d'attention
+        self.dropout_rate = dropout_rate  # Taux de dropout
         
         # Projections pour générer clés et valeurs de requête
         self.query_projection = nn.Linear(hidden_size, self.key_size)
@@ -48,6 +52,9 @@ class DifferentiableMemory(nn.Module):
         
         # Projection finale pour la sortie
         self.output_projection = nn.Linear(self.value_size + hidden_size, hidden_size)
+        
+        # Couche de dropout
+        self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
         
         # Initialiser la mémoire avec des zéros (sera définie lors du premier passage)
         self.register_buffer("memory_keys", torch.zeros(1, self.memory_size, self.key_size))

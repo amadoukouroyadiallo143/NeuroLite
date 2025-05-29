@@ -6,7 +6,6 @@ capable de traiter et d'unifier différentes modalités (texte, image, audio, vi
 dans un espace latent commun pour l'architecture NeuroLite.
 """
 
-from .config import TokenizerConfig
 from .tokenizer import NeuroLiteTokenizer
 from ..multimodal.encoders import (
     TextEncoder, 
@@ -33,7 +32,6 @@ from .hierarchical import HierarchicalTokenizer
 from .losses import MultimodalContrastiveLoss
 
 __all__ = [
-    'TokenizerConfig',
     'NeuroLiteTokenizer',
     'TextEncoder',
     'ImageEncoder',

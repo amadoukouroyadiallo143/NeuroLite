@@ -12,7 +12,13 @@ import os
 import json
 import time
 
-from ..Configs.config import NeuroLiteConfig
+from ..Configs.config import (
+    TrainingConfig, 
+    ModelArchitectureConfig, 
+    LoggingConfig, 
+    TokenizerConfig,
+    NeuroLiteConfig
+)
 from .projection import MinHashBloomProjection, TokenizedMinHashProjection
 from .mixer import MixerLayer, HyperMixer, FNetLayer
 from ..memory import DifferentiableMemory, ModernHopfieldLayer
@@ -21,7 +27,7 @@ from ..symbolic import NeuralSymbolicLayer, BayesianBeliefNetwork
 
 # Imports des nouveaux modules AGI
 from ..multimodal.multimodal import MultimodalProjection, MultimodalGeneration, CrossModalAttention
-from ..tokenization import NeuroLiteTokenizer, TokenizerConfig
+from ..tokenization import NeuroLiteTokenizer
 from ..memory.hierarchical_memory import HierarchicalMemory, VectorMemoryStore
 from ..continual.continual import ContinualAdapter, ReplayBuffer, ProgressiveCompressor
 from ..reasoning.reasoning import NeurosymbolicReasoner, StructuredPlanner
@@ -39,7 +45,12 @@ class NeuroLiteModel(nn.Module):
     def __init__(self, config: NeuroLiteConfig, task_type: str = "base", num_labels: int = None, tokenizer=None):
         super().__init__()
         
+        # Configuration du modèle
+        if not isinstance(config, NeuroLiteConfig):
+            raise ValueError("La configuration doit être une instance de NeuroLiteConfig")
+            
         self.config = config
+        self.model_config = config.model_config
         self.task_type = task_type  # Options: 'base', 'classification', 'sequence_labeling', 'generation'
         self.num_labels = num_labels
         self.tokenizer = tokenizer
@@ -51,166 +62,191 @@ class NeuroLiteModel(nn.Module):
         
         # Couche de projection d'entrée
         self.multimodal_to_hidden_proj = None
-        if getattr(config, 'use_multimodal_input', False):
-            multimodal_proj_output_dim = config.multimodal_output_dim if config.multimodal_output_dim > 0 else config.hidden_size
+        if self.model_config.use_multimodal_input:
+            multimodal_proj_output_dim = self.model_config.multimodal_output_dim \
+                if self.model_config.multimodal_output_dim > 0 else self.model_config.hidden_size
             
             # Utilisation du nouveau MultimodalProjection avec encodeurs spécialisés
             self.input_projection = MultimodalProjection(
                 output_dim=multimodal_proj_output_dim,
-                hidden_dim=getattr(config, 'multimodal_hidden_dim', 768),
-                dropout_rate=config.dropout_rate,
-                use_cross_attention=getattr(config, 'use_cross_modal_attention', True),
-                num_attention_heads=getattr(config, 'cross_modal_num_heads', 8),
-                image_size=getattr(config, 'image_size', 224),
-                patch_size=getattr(config, 'multimodal_image_patch_size', 16),
-                max_audio_length_ms=getattr(config, 'max_audio_length_ms', 30000),
-                max_video_frames=getattr(config, 'multimodal_video_num_sampled_frames', 32),
-                max_graph_nodes=getattr(config, 'max_graph_nodes', 32)
+                hidden_dim=self.model_config.multimodal_hidden_dim,
+                dropout_rate=self.model_config.dropout_rate,
+                use_cross_attention=self.model_config.use_cross_modal_attention,
+                num_attention_heads=self.model_config.cross_modal_num_heads,
+                image_size=getattr(self.model_config, 'image_size', 224),
+                patch_size=self.model_config.multimodal_image_patch_size,
+                max_audio_length_ms=getattr(self.model_config, 'max_audio_length_ms', 30000),
+                max_video_frames=self.model_config.multimodal_video_num_sampled_frames,
+                max_graph_nodes=getattr(self.model_config, 'max_graph_nodes', 32)
             )
             
             # Module de génération multimodale
             self.multimodal_generation = MultimodalGeneration(
-                input_dim=config.hidden_size,
-                hidden_dim=getattr(config, 'multimodal_hidden_dim', 768),
-                dropout_rate=config.dropout_rate,
-                vocab_size=config.vocab_size,
-                image_size=getattr(config, 'image_size', 224),
-                audio_sample_rate=getattr(config, 'audio_sample_rate', 16000),
-                audio_length_ms=getattr(config, 'audio_length_ms', 30000),
-                video_frames=getattr(config, 'multimodal_video_num_sampled_frames', 16),
-                max_graph_nodes=getattr(config, 'max_graph_nodes', 32)
+                input_dim=self.model_config.hidden_size,
+                hidden_dim=self.model_config.multimodal_hidden_dim,
+                dropout_rate=self.model_config.dropout_rate,
+                vocab_size=self.model_config.vocab_size,
+                image_size=getattr(self.model_config, 'image_size', 224),
+                audio_sample_rate=getattr(self.model_config, 'audio_sample_rate', 16000),
+                audio_length_ms=getattr(self.model_config, 'audio_length_ms', 30000),
+                video_frames=self.model_config.multimodal_video_num_sampled_frames,
+                max_graph_nodes=getattr(self.model_config, 'max_graph_nodes', 32)
             )
             
-            if multimodal_proj_output_dim != config.hidden_size:
-                self.multimodal_to_hidden_proj = nn.Linear(multimodal_proj_output_dim, config.hidden_size)
+            if multimodal_proj_output_dim != self.model_config.hidden_size:
+                self.multimodal_to_hidden_proj = nn.Linear(
+                    multimodal_proj_output_dim, 
+                    self.model_config.hidden_size
+                )
         else:
             # Original text-specific input projection
-            if config.input_projection_type == "minhash_bloom":
+            if self.model_config.input_projection_type == "minhash_bloom":
                 self.input_projection = MinHashBloomProjection(
-                    output_dim=config.hidden_size,
-                    minhash_permutations=config.minhash_num_permutations,
-                    bloom_filter_size=config.bloom_filter_size,
-                    dropout_rate=config.dropout_rate
+                    output_dim=self.model_config.hidden_size,
+                    minhash_permutations=self.model_config.minhash_num_permutations,
+                    bloom_filter_size=self.model_config.bloom_filter_size,
+                    dropout_rate=self.model_config.dropout_rate
                 )
-            else: # "ngram_hash" or tokenized
+            else:  # "ngram_hash" or tokenized
                 self.input_projection = TokenizedMinHashProjection(
-                    output_dim=config.hidden_size,
-                    minhash_permutations=config.minhash_num_permutations,
-                    bloom_filter_size=config.bloom_filter_size,
-                    vocab_size=config.vocab_size,
-                    dropout_rate=config.dropout_rate
+                    output_dim=self.model_config.hidden_size,
+                    minhash_permutations=self.model_config.minhash_num_permutations,
+                    dropout_rate=self.model_config.dropout_rate
                 )
             
+        # Initialisation des couches du modèle
+        self.layer_norm = nn.LayerNorm(
+            self.model_config.hidden_size, 
+            eps=self.model_config.layer_norm_eps
+        )
+        self.dropout = nn.Dropout(self.model_config.dropout_rate)
+        
+        # Couches de mélange (Mixer)
+        self.mixer_layers = nn.ModuleList([
+            MixerLayer(
+                dim=self.model_config.hidden_size,
+                seq_len=self.model_config.max_seq_length,
+                token_mixing_hidden_dim=self.model_config.token_mixing_hidden_size,
+                channel_mixing_hidden_dim=self.model_config.channel_mixing_hidden_size,
+                dropout_rate=self.model_config.dropout_rate,
+                activation=self.model_config.activation,
+                layer_norm_eps=self.model_config.layer_norm_epsilon
+            ) for _ in range(self.model_config.num_hidden_layers)
+        ])
+        
         # Couches de traitement principales (MLP-Mixer ou variantes)
         self.layers = nn.ModuleList()
-        for i in range(config.num_mixer_layers):
+        for i in range(self.model_config.num_hidden_layers):
             # Alterner différents types de couches selon la position
-            if i % 3 == 0 and config.use_dynamic_routing:
+            if i % 3 == 0 and self.model_config.use_dynamic_routing:
                 # Couche avec routage dynamique (MoE)
                 self.layers.append(
                     DynamicRoutingBlock(
-                        input_size=config.hidden_size,
-                        hidden_size=config.token_mixing_hidden_size,
-                        num_experts=config.num_experts,
-                        top_k=config.routing_top_k,
-                        dropout_rate=config.dropout_rate,
-                        activation=config.activation
+                        input_size=self.model_config.hidden_size,
+                        hidden_size=self.model_config.token_mixing_hidden_size,
+                        num_experts=self.model_config.num_experts,
+                        top_k=self.model_config.routing_top_k,
+                        dropout_rate=self.model_config.dropout_rate,
+                        activation=self.model_config.activation
                     )
                 )
             elif i % 3 == 1:
                 # Couche Mixer standard
                 self.layers.append(
                     MixerLayer(
-                        dim=config.hidden_size,
-                        seq_len=config.max_seq_length,
-                        token_mixing_hidden_dim=config.token_mixing_hidden_size,
-                        channel_mixing_hidden_dim=config.channel_mixing_hidden_size,
-                        dropout_rate=config.dropout_rate,
-                        activation=config.activation,
-                        layer_norm_eps=config.layer_norm_epsilon
+                        dim=self.model_config.hidden_size,
+                        seq_len=self.model_config.max_seq_length,
+                        token_mixing_hidden_dim=self.model_config.token_mixing_hidden_size,
+                        channel_mixing_hidden_dim=self.model_config.channel_mixing_hidden_size,
+                        dropout_rate=self.model_config.dropout_rate,
+                        activation=self.model_config.activation,
+                        layer_norm_eps=self.model_config.layer_norm_epsilon
                     )
                 )
             else:
                 # Couche HyperMixer pour mieux gérer les séquences variables
                 self.layers.append(
                     HyperMixer(
-                        dim=config.hidden_size,
-                        max_seq_len=config.max_seq_length,
-                        token_mixing_hidden_dim=config.token_mixing_hidden_size,
-                        channel_mixing_hidden_dim=config.channel_mixing_hidden_size,
-                        dropout_rate=config.dropout_rate,
-                        activation=config.activation,
-                        layer_norm_eps=config.layer_norm_epsilon
+                        dim=self.model_config.hidden_size,
+                        max_seq_len=self.model_config.max_seq_length,
+                        token_mixing_hidden_dim=self.model_config.token_mixing_hidden_size,
+                        channel_mixing_hidden_dim=self.model_config.channel_mixing_hidden_size,
+                        dropout_rate=self.model_config.dropout_rate,
+                        activation=self.model_config.activation,
+                        layer_norm_eps=self.model_config.layer_norm_epsilon
                     )
                 )
         
         # Mémoire externe - version améliorée avec hiérarchie
-        if config.use_external_memory:
-            if getattr(config, 'use_hierarchical_memory', False):
+        if self.model_config.use_external_memory:
+            if getattr(self.model_config, 'use_hierarchical_memory', False):
                 self.memory = HierarchicalMemory(
-                    config=self.config, # Pass the config object
-                    hidden_size=config.hidden_size,
-                    short_term_size=getattr(config, 'short_term_memory_size', 64),
-                    long_term_size=getattr(config, 'long_term_memory_size', config.memory_size),
-                    persistent_size=getattr(config, 'persistent_memory_size', 512),
-                    value_size=config.memory_dim
+                    config=self.model_config,  # Pass the model config object
+                    hidden_size=self.model_config.hidden_size,
+                    short_term_size=getattr(self.model_config, 'short_term_memory_size', 64),
+                    long_term_size=getattr(self.model_config, 'long_term_memory_size', self.model_config.memory_size),
+                    persistent_size=getattr(self.model_config, 'persistent_memory_size', 512),
+                    value_size=self.model_config.memory_dim
                 )
             else:
                 # Mémoire originale pour compatibilité
                 self.memory = DifferentiableMemory(
-                    hidden_size=config.hidden_size,
-                    memory_size=config.memory_size,
-                    value_size=config.memory_dim,
-                    update_rate=config.memory_update_rate
+                    hidden_size=self.model_config.hidden_size,
+                    memory_size=self.model_config.memory_size,
+                    key_size=self.model_config.hidden_size,
+                    value_size=self.model_config.memory_dim,
+                    update_rate=self.model_config.memory_update_rate,
+                    temperature=1.0  # Ajout de la température avec une valeur par défaut
                 )
         else:
             self.memory = None
             
         # Module symbolique et raisonnement (optionnels)
-        if config.use_symbolic_module:
-            if getattr(config, 'use_advanced_reasoning', False):
+        if self.model_config.use_symbolic_module:
+            if getattr(self.model_config, 'use_advanced_reasoning', False):
                 self.symbolic = NeurosymbolicReasoner(
-                    hidden_size=config.hidden_size,
-                    symbolic_dim=getattr(config, 'symbolic_dim', 64),
-                    num_inference_steps=getattr(config, 'num_inference_steps', 3),
-                    dropout_rate=config.dropout_rate
+                    hidden_size=self.model_config.hidden_size,
+                    symbolic_dim=getattr(self.model_config, 'symbolic_dim', 64),
+                    num_inference_steps=getattr(self.model_config, 'num_inference_steps', 3),
+                    dropout_rate=self.model_config.dropout_rate
                 )
             else:
                 # Module symbolique original pour compatibilité
                 self.symbolic = NeuralSymbolicLayer(
-                    config=config,  # Passer la configuration complète
-                    hidden_size=config.hidden_size,
-                    symbolic_rules_file=config.symbolic_rules_file,
-                    dropout_rate=config.dropout_rate
+                    config=self.model_config,
+                    hidden_size=self.model_config.hidden_size,
+                    symbolic_rules_file=getattr(self.model_config, 'symbolic_rules_file', None),
+                    dropout_rate=self.model_config.dropout_rate
                 )
         else:
             self.symbolic = None
 
         # Réseau Bayésien (optionnel)
-        if getattr(config, 'use_bayesian_module', False) and getattr(config, 'num_bayesian_variables', 0) > 0:
+        if getattr(self.model_config, 'use_bayesian_module', False) and \
+           getattr(self.model_config, 'num_bayesian_variables', 0) > 0:
             self.bayesian_network = BayesianBeliefNetwork(
-                config=config,  # Passer la configuration complète
-                hidden_size=config.hidden_size,
-                dropout_rate=config.dropout_rate
+                config=self.model_config,
+                hidden_size=self.model_config.hidden_size,
+                dropout_rate=self.model_config.dropout_rate
             )
         else:
             self.bayesian_network = None
             
         # Module de planification (optionnel)
-        if getattr(config, 'use_planning_module', False):
+        if getattr(self.model_config, 'use_planning_module', False):
             self.planner = StructuredPlanner(
-                hidden_size=config.hidden_size,
-                num_planning_steps=getattr(config, 'num_planning_steps', 5),
-                plan_dim=getattr(config, 'plan_dim', 64),
-                dropout_rate=config.dropout_rate
+                hidden_size=self.model_config.hidden_size,
+                num_planning_steps=getattr(self.model_config, 'num_planning_steps', 5),
+                plan_dim=getattr(self.model_config, 'plan_dim', 64),
+                dropout_rate=self.model_config.dropout_rate
             )
         else:
             self.planner = None
             
         # Couche de normalisation finale
         self.final_layer_norm = nn.LayerNorm(
-            config.hidden_size, 
-            eps=config.layer_norm_epsilon
+            self.model_config.hidden_size, 
+            eps=self.model_config.layer_norm_epsilon
         )
         
         # Projection multimodale (optionnelle) - This block is now handled above by replacing self.input_projection
@@ -224,46 +260,50 @@ class NeuroLiteModel(nn.Module):
         #     )
         
         # Adaptateur d'apprentissage continu (optionnel)
-        if getattr(config, 'use_continual_adapter', False): # Changed config name
+        if getattr(self.model_config, 'use_continual_adapter', False):
             self.continual_adapter = ContinualAdapter(
-                hidden_size=config.hidden_size,
-                buffer_size=getattr(config, 'continual_adapter_buffer_size', 100), # Changed config name
-                adaptation_rate=getattr(config, 'continual_adapter_rate', 0.1), # Changed config name
-                drift_threshold=getattr(config, 'continual_adapter_drift_threshold', 0.5), # Changed config name
-                dropout_rate=config.dropout_rate
+                hidden_size=self.model_config.hidden_size,
+                buffer_size=getattr(self.model_config, 'continual_adapter_buffer_size', 100),
+                adaptation_rate=getattr(self.model_config, 'continual_adapter_rate', 0.1),
+                drift_threshold=getattr(self.model_config, 'continual_adapter_drift_threshold', 0.5),
+                dropout_rate=self.model_config.dropout_rate
             )
         else:
             self.continual_adapter = None
 
         # Compresseur progressif (optionnel)
-        if getattr(config, 'use_progressive_compression', False):
+        if getattr(self.model_config, 'use_progressive_compression', False):
             self.progressive_compressor = ProgressiveCompressor(
-                hidden_size=config.hidden_size,
-                compression_ratio=getattr(config, 'compression_ratio', 0.5)
+                hidden_size=self.model_config.hidden_size,
+                compression_ratio=getattr(self.model_config, 'compression_ratio', 0.5)
             )
         else:
             self.progressive_compressor = None
 
         # Attention Cross-Modale (optionnelle)
         self.cross_modal_attention_text_image = None
-        self.project_text_for_cm_attn = None # Projection for text features before CM
-        self.project_image_for_cm_attn = None # Projection for image features before CM
+        self.project_text_for_cm_attn = None  # Projection for text features before CM
+        self.project_image_for_cm_attn = None  # Projection for image features before CM
 
-        if getattr(config, 'use_multimodal_input', False) and \
-           getattr(config, 'use_cross_modal_attention', False):
+        if getattr(self.model_config, 'use_multimodal_input', False) and \
+           getattr(self.model_config, 'use_cross_modal_attention', False):
             
-            # CrossModalAttention will operate on features of config.hidden_size
-            cm_interaction_dim = config.hidden_size 
+            # CrossModalAttention will operate on features of hidden_size
+            cm_interaction_dim = self.model_config.hidden_size 
             
             self.cross_modal_attention_text_image = CrossModalAttention(
                 hidden_size=cm_interaction_dim,
-                num_heads=config.cross_modal_num_heads, # This should be from config
-                dropout_rate=config.dropout_rate
+                num_heads=self.model_config.cross_modal_num_heads,
+                dropout_rate=self.model_config.dropout_rate
             )
             
             # Determine if individual modality features need projection to cm_interaction_dim
             # This is the output dimension of MultimodalProjection's individual modality features
-            multimodal_proj_individual_feature_dim = config.multimodal_output_dim if config.multimodal_output_dim > 0 else config.hidden_size
+            multimodal_proj_individual_feature_dim = (
+                self.model_config.multimodal_output_dim 
+                if getattr(self.model_config, 'multimodal_output_dim', 0) > 0 
+                else self.model_config.hidden_size
+            )
             
             if multimodal_proj_individual_feature_dim != cm_interaction_dim:
                 # These projections will be used if individual modality features (e.g., text, image)
@@ -276,26 +316,29 @@ class NeuroLiteModel(nn.Module):
         # Couches de sortie spécifiques selon le type de tâche
         if task_type == "classification" and num_labels is not None:
             # Couche de classification
-            self.classifier = nn.Linear(config.hidden_size, num_labels)
+            self.classifier = nn.Linear(self.model_config.hidden_size, num_labels)
         elif task_type == "sequence_labeling" and num_labels is not None:
             # Couche d'étiquetage de séquence
-            self.classifier = nn.Linear(config.hidden_size, num_labels)
+            self.classifier = nn.Linear(self.model_config.hidden_size, num_labels)
         elif task_type == "generation":
             # Couche de prédiction pour la génération de texte
-            vocab_size = config.vocab_size
+            vocab_size = self.model_config.vocab_size
             if tokenizer is not None:
                 if hasattr(tokenizer, 'word_to_idx'):
                     vocab_size = len(tokenizer.word_to_idx)
                 elif hasattr(tokenizer, 'vocab_size'):
                     vocab_size = tokenizer.vocab_size
-            self.lm_head = nn.Linear(config.hidden_size, vocab_size)
+            self.lm_head = nn.Linear(self.model_config.hidden_size, vocab_size)
         elif task_type == "multimodal_generation":
             # Cas spécial pour la génération multimodale (pas besoin de lm_head supplémentaire)
             # car le module multimodal_generation s'occupe déjà de la génération
             pass
         else:
             # Couche de projection générique pour le modèle de base
-            self.output_projection = nn.Linear(config.hidden_size, config.hidden_size)
+            self.output_projection = nn.Linear(
+                self.model_config.hidden_size, 
+                self.model_config.hidden_size
+            )
         
     def _process_text_input(self, texts: List[str]) -> torch.Tensor:
         """
@@ -573,8 +616,12 @@ class NeuroLiteModel(nn.Module):
                 outputs["loss"] = loss
         else:
             # Modèle de base - projection générique
-            output = self.output_projection(hidden_states)
-            outputs["hidden_states"] = output
+            if hasattr(self, 'output_projection'):
+                output = self.output_projection(hidden_states)
+                outputs["hidden_states"] = output
+            else:
+                # Si output_projection n'existe pas, utiliser hidden_states directement
+                outputs["hidden_states"] = hidden_states
         
         # Ajouter les états cachés et les sorties symboliques si demandé
         if output_hidden_states:
@@ -623,8 +670,61 @@ class NeuroLiteModel(nn.Module):
             
             # Sauvegarder la configuration
             config_path = os.path.join(save_dir, "config.json")
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config.__dict__, f, indent=4)
+            
+            # Fonction pour sérialiser de manière sécurisée
+            def safe_serialize(obj):
+                if obj is None:
+                    return None
+                elif isinstance(obj, (str, int, float, bool)):
+                    return obj
+                elif isinstance(obj, (list, tuple)):
+                    return [safe_serialize(x) for x in obj]
+                elif isinstance(obj, dict):
+                    return {str(k): safe_serialize(v) for k, v in obj.items()}
+                elif hasattr(obj, 'to_dict') and callable(getattr(obj, 'to_dict')):
+                    return safe_serialize(obj.to_dict())
+                elif hasattr(obj, '__dict__'):
+                    return safe_serialize(obj.__dict__)
+                else:
+                    return str(obj)
+            
+            try:
+                # Essayer de sérialiser avec to_dict()
+                if hasattr(self.config, 'to_dict') and callable(self.config.to_dict):
+                    config_dict = self.config.to_dict()
+                else:
+                    config_dict = safe_serialize(self.config.__dict__)
+                
+                # Nettoyer le dictionnaire des valeurs non sérialisables
+                cleaned_config = {}
+                for k, v in config_dict.items():
+                    try:
+                        json.dumps({k: v})  # Tester la sérialisation
+                        cleaned_config[k] = v
+                    except (TypeError, OverflowError) as e:
+                        print(f"Avertissement: Champ '{k}' non sérialisable, conversion en chaîne")
+                        cleaned_config[k] = str(v)
+                
+                # Sauvegarder le fichier de configuration
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(cleaned_config, f, indent=4, ensure_ascii=False)
+                    
+            except Exception as e:
+                print(f"Erreur critique lors de la sérialisation de la configuration: {e}")
+                print("Tentative de sauvegarde des champs de base...")
+                
+                # Dernier recours : sauvegarder uniquement les attributs de base
+                base_config = {}
+                if hasattr(self.config, '__dict__'):
+                    for k, v in self.config.__dict__.items():
+                        if not k.startswith('_'):  # Exclure les attributs privés
+                            try:
+                                base_config[k] = safe_serialize(v)
+                            except Exception as inner_e:
+                                base_config[k] = f"[SerializationError] {str(inner_e)}"
+                
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(base_config, f, indent=4, ensure_ascii=False)
             
             # Stratégie de sauvegarde en fonction des options
             if lightweight:
@@ -733,33 +833,67 @@ class NeuroLiteModel(nn.Module):
             Pour multimodal: Dictionnaire contenant les sorties générées par modalité
         """
         # Vérifier que le modèle est configuré pour la génération
-        if self.task_type != "generation" or not hasattr(self, 'lm_head'):
-            raise ValueError("Ce modèle n'est pas configuré pour la génération de texte. "
-                             "Initialisez-le avec task_type='generation' et un tokenizer.")
+        if self.task_type not in ["generation", "multimodal_generation"]:
+            raise ValueError("Ce modèle n'est pas configuré pour la génération. "
+                         "Initialisez-le avec task_type='generation' ou 'multimodal_generation' et un tokenizer.")
+        
+        # Vérifier que nous avons soit lm_head, soit multimodal_generation selon le type de tâche
+        if self.task_type == "generation" and not hasattr(self, 'lm_head'):
+            raise ValueError("Modèle de génération de texte non correctement initialisé. "
+                         "Assurez-vous d'avoir un tokenizer et un vocab_size valides.")
+        elif self.task_type == "multimodal_generation" and not hasattr(self, 'multimodal_generation'):
+            raise ValueError("Modèle de génération multimodale non correctement initialisé. "
+                         "Assurez-vous d'activer use_multimodal_input dans la configuration.")
         
         # Récupérer EOS token ID depuis le tokenizer si non spécifié
         if eos_token_id is None and self.tokenizer is not None and hasattr(self.tokenizer, 'special_tokens'):
             eos_token_id = self.tokenizer.special_tokens.get('<EOS>', None)
         
         # Vérifier si nous sommes en mode génération multimodale
-        if self.task_type == "multimodal_generation" and hasattr(self, 'multimodal_generation') and multimodal_inputs is not None:
+        if self.task_type == "multimodal_generation" and multimodal_inputs is not None:
+            # Vérifier si nous avons des modalités cibles spécifiques, sinon utiliser toutes les modalités disponibles
+            if target_modalities is None:
+                target_modalities = [k for k in multimodal_inputs.keys() if multimodal_inputs[k] is not None]
+            
+            # Vérifier que nous avons au moins une modalité cible valide
+            if not target_modalities:
+                raise ValueError("Aucune modalité cible valide spécifiée pour la génération multimodale.")
+                
             # Encoder les entrées multimodales
-            hidden_states = self.forward(multimodal_inputs=multimodal_inputs, output_hidden_states=False)
+            outputs = self.forward(multimodal_inputs=multimodal_inputs, output_hidden_states=False, return_dict=True)
             
-            # Si c'est un dictionnaire (retour de forward avec return_dict=True)
-            if isinstance(hidden_states, dict):
-                hidden_states = hidden_states.get('hidden_states', None)
+            # Gérer différents types de retours de la méthode forward de manière plus robuste
+            hidden_states = None
             
-            # Générer les sorties multimodales
-            if hidden_states is not None:
+            # Essayer différentes façons d'extraire les hidden_states
+            if hasattr(outputs, 'last_hidden_state'):
+                hidden_states = outputs.last_hidden_state
+            elif hasattr(outputs, 'hidden_states'):
+                hidden_states = outputs.hidden_states[-1] if isinstance(outputs.hidden_states, (list, tuple)) else outputs.hidden_states
+            elif isinstance(outputs, dict):
+                if 'last_hidden_state' in outputs:
+                    hidden_states = outputs['last_hidden_state']
+                elif 'hidden_states' in outputs:
+                    hidden_states = outputs['hidden_states'][-1] if isinstance(outputs['hidden_states'], (list, tuple)) else outputs['hidden_states']
+            elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+                # Si c'est un tuple, le premier élément est généralement les hidden_states
+                hidden_states = outputs[0]
+            
+            # Vérifier que nous avons bien des hidden_states
+            if hidden_states is None:
+                raise ValueError("Impossible de récupérer les états cachés à partir des sorties du modèle. "
+                               "Assurez-vous que le modèle renvoie bien les hidden_states dans son forward.")
+            
+            try:
+                # Utiliser la méthode forward du module de génération multimodale
+                # au lieu de la méthode generate qui n'existe pas
                 return self.multimodal_generation(
-                    hidden_states,
+                    latent=hidden_states.mean(dim=1),  # Moyenne sur la dimension de séquence
                     target_modalities=target_modalities,
                     temperature=temperature
                 )
-            else:
-                raise ValueError("Échec de l'encodage des entrées multimodales.")
-        
+            except Exception as e:
+                raise RuntimeError(f"Erreur lors de la génération multimodale: {str(e)}") from e
         # Génération de texte classique
         if multimodal_inputs is None:
             raise ValueError("multimodal_inputs doit être fourni pour la génération.")
@@ -772,18 +906,53 @@ class NeuroLiteModel(nn.Module):
             inputs_for_forward["input_ids"] = multimodal_inputs["input_ids"]
         
         # Encoder les entrées
-        outputs = self.forward(multimodal_inputs=inputs_for_forward, attention_mask=attention_mask)
-        if isinstance(outputs, dict):
-            hidden_states = outputs.get('hidden_states')
-            if hidden_states is None:
-                raise ValueError("Impossible de récupérer les hidden_states pour la génération.")
-            
-            # Utiliser les sorties pour la génération (approche simplifiée)
-            logits = self.lm_head(hidden_states[:, -1, :])  # Utiliser le dernier token pour prédire
-            next_token = torch.argmax(logits, dim=-1).unsqueeze(-1)
+        outputs = self.forward(
+            multimodal_inputs=inputs_for_forward, 
+            attention_mask=attention_mask,
+            return_dict=True  # S'assurer d'avoir un dictionnaire en sortie
+        )
+        
+        # Gérer différents types de sorties du modèle de manière robuste
+        hidden_states = None
+        logits = None
+        
+        # Essayer d'extraire les hidden_states ou logits selon la structure de sortie
+        if hasattr(outputs, 'last_hidden_state'):
+            hidden_states = outputs.last_hidden_state
+        elif hasattr(outputs, 'hidden_states'):
+            hidden_states = outputs.hidden_states[-1] if isinstance(outputs.hidden_states, (list, tuple)) else outputs.hidden_states
+        elif hasattr(outputs, 'logits'):
+            logits = outputs.logits
+        elif isinstance(outputs, dict):
+            if 'last_hidden_state' in outputs:
+                hidden_states = outputs['last_hidden_state']
+            elif 'hidden_states' in outputs:
+                hidden_states = outputs['hidden_states'][-1] if isinstance(outputs['hidden_states'], (list, tuple)) else outputs['hidden_states']
+            elif 'logits' in outputs:
+                logits = outputs['logits']
+        elif isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+            # Si c'est un tuple, le premier élément est généralement les hidden_states ou logits
+            if torch.is_tensor(outputs[0]):
+                if len(outputs[0].shape) >= 2:  # Vérifier si c'est bien un tenseur de séquence
+                    hidden_states = outputs[0]
+                else:
+                    logits = outputs[0]
+        
+        # Si nous avons des logits, les utiliser directement
+        if logits is not None:
+            next_token = torch.argmax(logits[:, -1, :], dim=-1).unsqueeze(-1)
             input_ids = next_token
+        # Sinon, utiliser les hidden_states avec la tête de langage
+        elif hidden_states is not None:
+            if hasattr(self, 'lm_head'):
+                logits = self.lm_head(hidden_states[:, -1, :])  # Utiliser le dernier token
+                next_token = torch.argmax(logits, dim=-1).unsqueeze(-1)
+                input_ids = next_token
+            else:
+                raise ValueError("Le modèle n'a pas de tête de langage (lm_head) pour la génération.")
         else:
-            raise ValueError("La sortie du forward n'est pas un dictionnaire comme attendu.")
+            raise ValueError("Impossible de récupérer les hidden_states ou logits pour la génération. "
+                           "Assurez-vous que le modèle renvoie bien ces valeurs dans son forward.")
         
         # Vérification des entrées pour la génération de texte
         if input_ids is None:
@@ -806,12 +975,37 @@ class NeuroLiteModel(nn.Module):
                 input_ids, max_length, num_beams, pad_token_id, eos_token_id, attention_mask
             )
             
+        # Initialiser le tenseur de sortie avec les input_ids initiaux
+        generated = input_ids.clone()
+        
         # Génération auto-régressive token par token
         with torch.no_grad():
             for _ in range(max_length - input_ids.shape[1]):
+                # Créer un dictionnaire d'entrées pour le forward
+                current_inputs = {"input_ids": generated}
+                
                 # Calculer les logits pour la position actuelle
-                outputs = self.forward(input_ids=input_ids, attention_mask=attention_mask)
-                logits = outputs["logits"]
+                outputs = self.forward(
+                    multimodal_inputs=current_inputs,
+                    attention_mask=attention_mask,
+                    return_dict=True
+                )
+                
+                # Extraire les logits de la sortie
+                if isinstance(outputs, dict):
+                    if 'logits' in outputs:
+                        logits = outputs['logits']
+                    elif 'hidden_states' in outputs and hasattr(self, 'lm_head'):
+                        logits = self.lm_head(outputs['hidden_states'])
+                    else:
+                        raise ValueError("Impossible de récupérer les logits pour la génération.")
+                else:
+                    # Si la sortie n'est pas un dictionnaire, on suppose que c'est directement les logits
+                    logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                    
+                    # Si ce ne sont pas des logits mais des hidden_states, les projeter
+                    if hasattr(self, 'lm_head') and logits.dim() == 3 and logits.size(-1) != self.lm_head.out_features:
+                        logits = self.lm_head(logits)
                 
                 # Prendre les logits de la dernière position
                 next_token_logits = logits[:, -1, :]
@@ -877,12 +1071,20 @@ class NeuroLiteModel(nn.Module):
                 # Mettre à jour le masque d'attention si fourni
                 if attention_mask is not None:
                     attention_mask = torch.cat(
-                        [attention_mask, attention_mask.new_ones((batch_size, 1))], dim=-1
+                        [attention_mask, attention_mask.new_ones((batch_size, 1), device=attention_mask.device)], 
+                        dim=-1
                     )
                 
                 # Arrêter si tous les batchs ont généré EOS ou atteint max_length
-                if eos_token_id is not None and (next_token == eos_token_id).all():
-                    break
+                if eos_token_id is not None:
+                    # Vérifier si le dernier token généré est EOS dans tous les batchs
+                    if (next_token == eos_token_id).all():
+                        break
+                    
+                    # Vérifier si EOS apparaît quelque part dans la séquence générée
+                    eos_in_batch = (generated == eos_token_id).any(dim=1)
+                    if eos_in_batch.all():
+                        break
         
         return generated
     

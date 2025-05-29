@@ -708,7 +708,33 @@ def analyze_tokenizer(tokenizer, test_data, output_dir):
     # Sauvegarder les résultats d'analyse
     results = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "tokenizer_config": tokenizer.config.__dict__,
+        # Ne pas inclure directement tokenizer.config.__dict__ car il contient des objets non sérialisables
+    }
+    
+    # Ajouter manuellement les champs importants de la configuration
+    config = tokenizer.config
+    results["tokenizer_config"] = {
+        "semantic_vocab_size": config.semantic_vocab_size,
+        "detail_vocab_size": config.detail_vocab_size,
+        "hidden_size": config.hidden_size,
+        "dropout_rate": config.dropout_rate,
+        "use_residual_vq": config.use_residual_vq,
+        "num_residual_layers": config.num_residual_layers,
+        "use_dual_codebook": config.use_dual_codebook,
+        "hierarchical_levels": config.hierarchical_levels,
+        "commitment_weight": config.commitment_weight,
+        "use_context_modulation": config.use_context_modulation,
+        "modality_alignment_weight": config.modality_alignment_weight,
+        "modality_dims": config.modality_dims,
+        "learning_rate": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "warmup_steps": config.warmup_steps,
+        "total_steps": config.total_steps,
+        "num_epochs": config.num_epochs,
+        "reconstruction_weight": config.reconstruction_weight,
+        "contrastive_weight": config.contrastive_weight,
+        "max_grad_norm": config.max_grad_norm,
+        "contrastive_temperature": config.contrastive_temperature
     }
     
     if 'semantic_indices' in tokens_output:
@@ -721,15 +747,22 @@ def analyze_tokenizer(tokenizer, test_data, output_dir):
     # Sauvegarder en JSON
     with open(output_dir / "analysis_results.json", 'w', encoding='utf-8') as f:
         # Convertir les objets non sérialisables
-        clean_results = {}
-        for key, value in results.items():
-            if isinstance(value, dict):
-                clean_results[key] = {k: v for k, v in value.items() 
-                                    if not isinstance(v, (torch.Tensor, nn.Module))}
-            elif not isinstance(value, (torch.Tensor, nn.Module)):
-                clean_results[key] = value
+        def clean_json_serializable(obj):
+            if isinstance(obj, (int, float, str, bool)) or obj is None:
+                return obj
+            elif isinstance(obj, dict):
+                return {k: clean_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [clean_json_serializable(i) for i in obj]
+            elif hasattr(obj, '__dict__'):
+                return clean_json_serializable(obj.__dict__)
+            elif isinstance(obj, (torch.Tensor, np.ndarray)):
+                return obj.tolist()
+            else:
+                return str(obj)  # Convertir tout le reste en chaîne
         
-        json.dump(clean_results, f, indent=2)
+        clean_results = clean_json_serializable(results)
+        json.dump(clean_results, f, indent=2, ensure_ascii=False)
 
 
 def main():

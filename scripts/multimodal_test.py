@@ -440,26 +440,90 @@ def test_latent_core(model: NeuroLiteModel, data: Dict[str, Any]) -> None:
             return_dict=True
         )
     
-    # Supposons que nous pouvons accéder aux latents du modèle
-    # Cette partie dépend de l'implémentation spécifique du modèle
-    if hasattr(model, 'latent_states') and model.latent_states is not None:
-        latents = model.latent_states
-        
-        # Visualiser les latents
-        if isinstance(latents, torch.Tensor):
-            latents_np = latents.cpu().numpy()
-            
-            plt.figure(figsize=(12, 8))
-            plt.imshow(latents_np[0], aspect='auto', cmap='plasma')  # Premier exemple du batch
-            plt.colorbar(label="Valeur d'activation")
-            plt.title("États latents du noyau universel")
-            plt.xlabel("Dimension")
-            plt.ylabel("Position latente")
-            plt.tight_layout()
-            plt.savefig(RESULTS_DIR / "latent_core.png")
-            plt.show()
+    # Vérifier les clés disponibles dans les sorties
+    print("Clés disponibles dans les sorties:", list(outputs.keys()))
+    
+    # Essayer de récupérer les hidden_states de différentes manières
+    hidden_states = None
+    
+    # 1. Vérifier si 'all_hidden_states' est disponible
+    if 'all_hidden_states' in outputs and outputs['all_hidden_states'] is not None:
+        hidden_states = outputs['all_hidden_states'][-1]  # Dernière couche
+        print(f"Utilisation de all_hidden_states. Taille: {hidden_states.shape}")
+    # 2. Vérifier si 'hidden_states' est disponible
+    elif 'hidden_states' in outputs and outputs['hidden_states'] is not None:
+        hidden_states = outputs['hidden_states']
+        if isinstance(hidden_states, (list, tuple)):
+            hidden_states = hidden_states[-1]  # Dernière couche si c'est une liste
+        print(f"Utilisation de hidden_states. Taille: {hidden_states.shape}")
+    # 3. Vérifier si 'last_hidden_state' est disponible
+    elif 'last_hidden_state' in outputs and outputs['last_hidden_state'] is not None:
+        hidden_states = outputs['last_hidden_state']
+        print(f"Utilisation de last_hidden_state. Taille: {hidden_states.shape}")
     else:
-        print("Les états latents ne sont pas accessibles directement dans le modèle actuel.")
+        print("Aucun état caché trouvé dans les sorties.")
+        print("Sorties disponibles:", list(outputs.keys()))
+        return
+    
+    # Vérifier si nous avons des hidden_states à visualiser
+    if hidden_states is not None and isinstance(hidden_states, torch.Tensor):
+        # Prendre la moyenne sur la dimension de séquence pour obtenir une représentation par exemple
+        if hidden_states.dim() > 2:  # [batch_size, seq_len, hidden_dim]
+            latent_representations = hidden_states.mean(dim=1)  # [batch_size, hidden_dim]
+        else:  # [batch_size, hidden_dim]
+            latent_representations = hidden_states
+            
+        latents_np = latent_representations.detach().cpu().numpy()
+        
+        # Créer le répertoire de résultats s'il n'existe pas
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        
+        # Visualisation 1: Heatmap des représentations latentes
+        plt.figure(figsize=(12, 8))
+        plt.imshow(latents_np, aspect='auto', cmap='plasma')
+        plt.colorbar(label="Valeur d'activation")
+        plt.title("Représentations latentes moyennes")
+        plt.xlabel("Dimension")
+        plt.ylabel("Exemple")
+        plt.tight_layout()
+        plt.savefig(RESULTS_DIR / "latent_representations.png")
+        print(f"Visualisation des représentations latentes sauvegardée dans {RESULTS_DIR}/latent_representations.png")
+        plt.close()
+        
+        # Visualisation 2: Matrice de similarité cosinus
+        if latents_np.shape[0] > 1:  # Nécessite au moins 2 exemples
+            from sklearn.metrics.pairwise import cosine_similarity
+            similarity_matrix = cosine_similarity(latents_np)
+            
+            plt.figure(figsize=(10, 8))
+            plt.imshow(similarity_matrix, cmap='viridis', vmin=0, vmax=1)
+            plt.colorbar(label="Similarité cosinus")
+            plt.title("Similarité entre les représentations latentes")
+            plt.xlabel("Index de l'exemple")
+            plt.ylabel("Index de l'exemple")
+            plt.tight_layout()
+            plt.savefig(RESULTS_DIR / "latent_similarity.png")
+            print(f"Matrice de similarité sauvegardée dans {RESULTS_DIR}/latent_similarity.png")
+            plt.close()
+            
+            # Afficher les paires les plus similaires et les moins similaires
+            if latents_np.shape[0] > 2:  # Nécessite au moins 3 exemples pour des comparaisons significatives
+                # Masquer la diagonale (auto-similarité = 1.0)
+                np.fill_diagonal(similarity_matrix, -1)
+                
+                # Trouver les indices des paires les plus similaires
+                max_sim_indices = np.unravel_index(np.argmax(similarity_matrix), similarity_matrix.shape)
+                max_sim = similarity_matrix[max_sim_indices]
+                
+                # Réinitialiser la matrice pour trouver les paires les moins similaires
+                similarity_matrix[similarity_matrix == -1] = 1  # Remplacer la diagonale par 1
+                min_sim_indices = np.unravel_index(np.argmin(similarity_matrix), similarity_matrix.shape)
+                min_sim = similarity_matrix[min_sim_indices]
+                
+                print(f"Paire la plus similaire: exemples {max_sim_indices} (similarité: {max_sim:.4f})")
+                print(f"Paire la moins similaire: exemples {min_sim_indices} (similarité: {min_sim:.4f})")
+    else:
+        print("Aucun tenseur d'états cachés valide trouvé pour la visualisation.")
 
 
 def main():

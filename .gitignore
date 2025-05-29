@@ -27,11 +27,12 @@ wheels/
 *.egg
 
 # Checkpoints et modèles entraînés (potentiellement volumineux)
-# models/*.pt
-# models/*.pth
-# checkpoints/
-# *.ckpt
-
+models/*.pt
+models/*.pth
+checkpoints/
+*.ckpt
+saved_models/
+outputs/
 # Données d'entraînement (volumineux)
 # data/wikitext/*
 # data/raw/
