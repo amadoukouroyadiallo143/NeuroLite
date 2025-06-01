@@ -130,12 +130,17 @@ class HierarchicalMemory(nn.Module):
         )
         
         # Mécanisme d'attention multi-tête pour intégrer les mémoires
+
+        # NeuroLiteConfig always has a .device attribute.
+        hm_device_to_use = config.device
+        # print(f"[HierarchicalMemory __init__] Using device from config: {hm_device_to_use}")
+
         self.memory_attention = nn.MultiheadAttention(
             embed_dim=self.hidden_size,
             num_heads=self.attention_heads,
             dropout=self.dropout_rate,
             batch_first=True,
-            device=config.device if hasattr(config, 'device') else 'cuda'
+            device=hm_device_to_use
         )
         
         # Projection de sortie
@@ -359,7 +364,7 @@ class HierarchicalMemory(nn.Module):
         # Simuler l'effet d'oubli en fonction du temps écoulé
         current_time = time.time()
         elapsed_time = current_time - self.last_access_time.item()
-        forgetting_factor = self.forgetting_scale ** min(elapsed_time / 3600, 10)  # Limité à 10h max
+        forgetting_factor = self.memory_forgetting_scale ** min(elapsed_time / 3600, 10)  # Limité à 10h max
         self.last_access_time.fill_(current_time)
         
         # Optimisation: pour les séquences longues, échantillonner certains points pour la mise à jour

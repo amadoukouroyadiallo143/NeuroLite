@@ -11,6 +11,7 @@ import numpy as np
 import time
 from typing import Dict, List, Optional, Union, Tuple, Any
 import random
+from neurolite.memory.hierarchical_memory import HierarchicalMemory
 
 class ReplayBuffer:
     """
@@ -105,7 +106,8 @@ class ContinualAdapter(nn.Module):
         buffer_size: int = 100,
         adaptation_rate: float = 0.1,
         drift_threshold: float = 0.5,
-        dropout_rate: float = 0.1
+        dropout_rate: float = 0.1,
+        memory_system: Optional[HierarchicalMemory] = None
     ):
         super().__init__()
         
@@ -113,6 +115,7 @@ class ContinualAdapter(nn.Module):
         self.buffer_size = buffer_size
         self.adaptation_rate = adaptation_rate
         self.drift_threshold = drift_threshold
+        self.memory_system = memory_system
         
         # Mémoire d'expériences (replay buffer)
         self.buffer = ReplayBuffer(capacity=buffer_size)
@@ -308,7 +311,39 @@ class ContinualAdapter(nn.Module):
                 optimizer.step()
                 
             # Libérer la mémoire
-            del inputs, targets, loss
+            # Keep inputs for potential memory consolidation
+            # del inputs, targets, loss
+            # torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+            # Consolidate important information from adaptation into HierarchicalMemory
+            if self.memory_system is not None and 'inputs' in locals() and inputs is not None:
+                if hasattr(self.memory_system, 'long_term_memory') and \
+                   hasattr(self.memory_system.long_term_memory, 'add'):
+                    try:
+                        # Heuristic: consider the mean of the adapted inputs as important info
+                        # inputs is [batch_size_adapt, seq_len, hidden_size]
+                        # We might want to average across batch and seq_len for a single vector
+                        # or store each item if the memory system can handle it.
+                        # For simplicity, let's average all inputs used in this adaptation batch.
+                        info_to_consolidate = inputs.mean(dim=[0, 1]) # [hidden_size]
+
+                        # Ensure it's on the correct device and has a batch dimension for .add
+                        info_to_consolidate = info_to_consolidate.to(device).unsqueeze(0) # [1, hidden_size]
+
+                        self.memory_system.long_term_memory.add(
+                            embedding=info_to_consolidate,
+                            metadata={"source": "ContinualAdapter",
+                                      "type": "adaptation_experience",
+                                      "importance_metric": loss.item() if 'loss' in locals() and loss is not None else -1.0}
+                        )
+                        # print(f"ContinualAdapter: Consolidated adaptation info to LTM. Shape: {info_to_consolidate.shape}")
+                    except Exception as mem_e:
+                        print(f"ContinualAdapter: Error consolidating info to memory: {mem_e}")
+
+            # Now, ensure cleanup
+            if 'inputs' in locals(): del inputs
+            if 'targets' in locals(): del targets
+            if 'loss' in locals(): del loss
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
         except RuntimeError as e:

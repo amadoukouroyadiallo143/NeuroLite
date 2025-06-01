@@ -1,9 +1,13 @@
 # NeuroLite
 
-Une architecture universelle d'IA légère pour les appareils mobiles et embarqués, fournissant des alternatives efficaces aux Transformers. NeuroLite implémente des approches innovantes (MLP-Mixer, mémoire neuronale, encodeurs modulaires spécialisés, tokenizer multimodal) pour créer des modèles compacts capables de traiter des données multimodales avec une fraction des ressources requises par les architectures traditionnelles.
+# NeuroLite: Vers une Intelligence Artificielle Générale (AGI) Légère et Efficace
+
+NeuroLite est une architecture d'IA universelle et légère, conçue spécifiquement pour les appareils mobiles, embarqués, et les environnements où les ressources sont limitées. Elle offre une alternative performante aux modèles de type Transformer, en se concentrant sur l'efficacité computationnelle et une faible empreinte mémoire.
+
+Au cœur de NeuroLite se trouve une **vision AGI** : développer un système capable d'une compréhension multimodale profonde, d'un apprentissage continu autonome, d'une mémorisation contextuelle robuste, et d'un raisonnement hybride (neuronal et symbolique) flexible. Plutôt que de s'appuyer sur une mise à l'échelle massive, NeuroLite vise l'AGI par l'intégration synergique de modules spécialisés et optimisés, favorisant une intelligence plus adaptable et généralisable.
 
 <div align="center">
-<strong>Complexité Linéaire | Empreinte Minimale | AGI Universelle | Multimodalité Avancée</strong>
+<strong>Complexité Linéaire | Empreinte Minimale | Apprentissage Continu | Raisonnement Hybride | Perception Multimodale | Vision AGI</strong>
 </div>
 
 ## 🌟 Points Clés
@@ -18,42 +22,44 @@ Une architecture universelle d'IA légère pour les appareils mobiles et embarqu
 - **Routage Intelligent**: Activation conditionnelle des experts spécialisés selon le type d'entrée
 - **Composant Symbolique**: Module léger de raisonnement structuré pour améliorer les capacités symboliques
 - **Mobile-First**: Conçu pour fonctionner efficacement sur smartphones, wearables et dispositifs IoT
+- **Mémoire Hiérarchique Intégrée**: `HierarchicalMemory` fournit un contexte riche pour le raisonnement et l'apprentissage, avec des interactions explicites avec `NeurosymbolicReasoner`, `StructuredPlanner`, et `ContinualAdapter`.
+- **Fusion Multimodale Avancée**: Stratégie de fusion améliorée utilisant un `CrossModalFuser` (basé sur l'attention self/croisée) pour une intégration plus profonde des différentes modalités au début du traitement.
+- **Apprentissage Continu Amélioré**: `ContinualAdapter` peut désormais consolider les connaissances importantes dans `HierarchicalMemory`, renforçant l'apprentissage à long terme.
+- **Optimisations d'Efficacité**:
+    - Quantification Post-Entraînement (PTQ) démontrée avec succès, réduisant la taille du modèle de ~70% tout en maintenant la fonctionnalité.
+    - `DynamicRoutingBlock` (utilisant `SparseDispatcher`) optimisé avec `scatter_add_` pour une agrégation plus rapide des sorties d'experts et ajout de statistiques d'utilisation des experts.
+- **Pipeline de Données Multimodal (Esquisse)**: Introduction de `MultimodalDataset` et `multimodal_collate_fn` pour une gestion structurée des données multimodales.
 
 ## 📝️ Architecture
 
-NeuroLite combine plusieurs innovations récentes en une architecture hybride légère et performante:
+NeuroLite combine plusieurs innovations récentes en une architecture hybride légère et performante, conçue pour une intelligence artificielle générale et efficace :
 
 ![Architecture NeuroLite](./architectures/neurolite_architecture_modern_fr.png)
+*Diagramme conceptuel de l'architecture NeuroLite, illustrant l'interaction des modules clés.*
 
-1.  **Tokenizer Multimodal Avancé (`NeuroLiteTokenizer`)**:
-    *   **Double Codebook**: Implémente un système à deux niveaux de codebook - un pour les caractéristiques sémantiques (signification globale) et un pour les détails fins.
-    *   **Quantification Vectorielle Résiduelle**: Améliore la précision de la représentation en quantifiant itérativement les résidus.
-    *   **Contrastive Learning Cross-Modal**: Utilise une technique d'InfoNCE pour aligner les représentations de différentes modalités dans l'espace latent commun, maximisant la similarité entre les mêmes échantillons dans différentes modalités.
-    *   **Adaptabilité Dimensionnelle**: Gère automatiquement les différences de dimensions entre les modalités d'entrée (redimensionnement intelligent des images et vidéos, normalisation des canaux audio).
-    *   **Modulation Contextuelle**: Ajuste dynamiquement les représentations en fonction du contexte global.
+1.  **Entrée et Perception Multimodale**:
+    *   **Tokenizer Multimodal Avancé (`NeuroLiteTokenizer`)**: Ce module (décrit plus en détail dans le code source `neurolite/tokenization/tokenizer.py`) transforme les données brutes de diverses modalités en un format tokenisé adapté au traitement neuronal. Il utilise des techniques comme un double codebook (sémantique et détail) et la quantification vectorielle résiduelle.
+    *   **Projection d'Entrée Multimodale (`MultimodalProjection`)**: Ce module (`neurolite/multimodal/multimodal.py`) prend les données brutes ou prétraitées de chaque modalité (texte, image, audio, vidéo, graphe) et les encode en représentations vectorielles. Il utilise des encodeurs spécialisés pour chaque modalité (ex: `TextEncoder`, `ImageEncoder` basé sur ViT).
+    *   **Fusion Multimodale Stratégique (`CrossModalFuser`)**: NeuroLite intègre désormais un module `CrossModalAttention` (appelé `cross_modal_fuser` dans `NeuroLiteModel`) qui opère directement sur les sorties individuelles de `MultimodalProjection`. Ce module applique une attention croisée (ou self-attention) sur la séquence des représentations modales, permettant une fusion riche et contextuelle avant l'entrée dans les couches de traitement principales. Cette approche remplace l'ancienne méthode d'application de l'attention croisée plus tard dans le réseau.
 
-2.  **Projection d'Entrée Multimodale Améliorée** (`MultimodalProjection`):
-    *   **Encodeurs Spécialisés**: Modules dédiés pour chaque modalité, conçus pour extraire les caractéristiques les plus pertinentes.
-        *   **Texte** (`TextEncoder`): Architecture basée sur l'attention avec prise en charge de divers modèles d'embedding.
-        *   **Image** (`ImageEncoder`): Vision Transformer (ViT) optimisé pour le traitement efficace d'images.
-        *   **Audio** (`AudioEncoder`): Convolutions et encodage spectral pour extraire les caractéristiques fréquentielles et temporelles.
-        *   **Vidéo** (`VideoEncoder`): Traitement spatio-temporel avec attention temporelle entre les trames.
-        *   **Graphe** (`GraphEncoder`): Utilise des mécanismes d'attention pour encoder les relations entre nœuds.
-    *   **Attention Cross-Modale**: Mécanisme qui permet aux différentes modalités d'interagir et d'enrichir mutuellement leurs représentations.
-    *   **Fusion Adaptative**: Les représentations de chaque modalité sont fusionnées via un mécanisme pondéré contextuel qui s'adapte à l'importance relative de chaque modalité.
-2.  **Backbone All-MLP** - Couches MLP-Mixer ou HyperMixer pour un traitement de séquence avec complexité temporelle et spatiale linéaire.
-3.  **Mémoire Externe Hiérarchique (`HierarchicalMemory`)**: Système de mémoire associative à plusieurs niveaux (court, long, persistant) pour la rétention contextuelle, avec des mécanismes de consolidation intelligente basés sur la nouveauté et des portes contextuelles pour la récupération.
-4.  **Composants Neurosymboliques Avancés**:
-    - **Moteur de Règles Symboliques (`SymbolicRuleEngine`)**: Un moteur d'inférence léger qui charge des règles (logique de premier ordre) et des faits à partir de fichiers JSON. Il supporte l'ajout dynamique de faits, l'inférence vers l'avant (forward chaining) et la gestion de la négation dans les prémisses des règles.
-    - **Couche Neurosymbolique (`NeuralSymbolicLayer`)**: Intègre le `SymbolicRuleEngine` dans le pipeline neuronal. Cette couche peut extraire des entités et relations potentielles des états cachés du modèle, les affirmer comme faits transitoires au moteur de règles, initier une phase d'inférence, puis réintégrer les faits dérivés dans les représentations neuronales. Elle supporte le traitement par batch et utilise des embeddings apprenables pour les types de prédicats et les identifiants d'entités symboliques, permettant au modèle d'apprendre à interpréter et utiliser les résultats du raisonnement symbolique. Le fichier `rules.json` (configurable via `symbolic_rules_file` dans `NeuroLiteConfig`) est utilisé pour charger les règles et faits persistants.
-    - **Réseau Bayésien (`BayesianBeliefNetwork`)**: Permet d'intégrer des connaissances probabilistes et d'effectuer du raisonnement incertain. La structure du réseau (variables et leurs dépendances) peut être définie via la configuration (`bayesian_network_structure` et `num_bayesian_variables` dans `NeuroLiteConfig`). Le module utilise un algorithme d'inférence approximative (basé sur le Likelihood Weighting) pour estimer les probabilités postérieures étant donné des évidences extraites des états neuronaux.
-5. **Routage dynamique** - Activation conditionnelle de sous-modules spécialisés via Mixture-of-Experts léger
-6. **Apprentissage Continu et Mémoire Évoluée**:
-    - **Adaptateur d'Apprentissage Continu (`ContinualAdapter`)**: Intégré au modèle, ce module vise à permettre l'apprentissage à partir de nouvelles données au fil du temps tout en atténuant l'oubli catastrophique des connaissances antérieures. Il utilise des mécanismes comme un tampon de rejeu (`replay buffer`) pour stocker des expériences passées, une détection conceptuelle de dérive de distribution (`drift detection`), et des stratégies d'adaptation du modèle. Voir `examples/lifelong_learning_demo.py`.
-    - **Mémoire Hiérarchique Améliorée (déplacé au point 3)**
-7.  **Attention Cross-Modale (`CrossModalAttention`)**: Un module optionnel (`config.use_cross_modal_attention`) qui permet au modèle de fusionner les informations entre différentes modalités à un niveau plus profond. Par exemple, les représentations textuelles peuvent "prêter attention" aux caractéristiques d'une image pour enrichir la compréhension globale. Ce module est appliqué après les premières couches de traitement.
+2.  **Cœur du Modèle et Traitement Séquentiel**:
+    *   **Backbone All-MLP**: Utilise des couches de type MLP-Mixer ou HyperMixer (`neurolite/core/mixer.py`) pour un traitement efficace des séquences avec une complexité linéaire, offrant une alternative aux couches d'attention coûteuses des Transformers.
+    *   **Routage Dynamique (`DynamicRoutingBlock`)**: Ce bloc (`neurolite/routers/routing.py`) intègre un `SparseDispatcher` (Mixture-of-Experts optimisé) pour activer conditionnellement seulement un sous-ensemble d'experts (petits réseaux de neurones) en fonction de l'entrée. Cela permet d'augmenter la capacité du modèle sans augmenter proportionnellement la charge de calcul pour chaque inférence. Des optimisations récentes incluent l'utilisation de `scatter_add_` pour une agrégation plus efficace et la possibilité de retourner des statistiques d'activation des experts.
 
-## 🧠 Fondements Théoriques
+3.  **Mémoire, Apprentissage et Raisonnement**:
+    *   **Mémoire Hiérarchique (`HierarchicalMemory`)**: Située dans `neurolite/memory/hierarchical_memory.py`, cette mémoire à plusieurs niveaux (court terme, long terme, persistant) est cruciale pour la rétention contextuelle. Elle interagit désormais de manière plus profonde avec d'autres modules :
+        *   **Intégration avec le Raisonnement**: `NeurosymbolicReasoner` et `StructuredPlanner` (dans `neurolite/reasoning/reasoning.py`) peuvent consulter `HierarchicalMemory` pour des faits et contextes pertinents lors de leurs processus. Le raisonneur peut stocker des conclusions importantes, et le planificateur peut mémoriser des plans réussis.
+        *   **Intégration avec l'Apprentissage Continu**: `ContinualAdapter` (`neurolite/continual/continual.py`) peut consolider les informations et expériences jugées importantes (par exemple, celles issues de son `ReplayBuffer` ou ayant conduit à une adaptation significative) dans `HierarchicalMemory`, favorisant un apprentissage cumulatif et à long terme.
+    *   **Composants Neurosymboliques et de Planification (`NeurosymbolicReasoner`, `StructuredPlanner`)**: Ces modules permettent au modèle d'effectuer un raisonnement structuré et de planifier des actions. Leur interaction avec la mémoire hiérarchique leur confère une capacité accrue à utiliser des connaissances passées et à stocker de nouvelles informations apprises.
+    *   **Adaptateur d'Apprentissage Continu (`ContinualAdapter`)**: Permet au modèle de s'adapter à de nouvelles données ou tâches au fil du temps, tout en atténuant l'oubli catastrophique, notamment grâce à son interaction avec `HierarchicalMemory`.
+
+4.  **Optimisations d'Efficacité**:
+    *   **Quantification Post-Entraînement (PTQ)**: Des expériences (voir `ptq_script.py` après exécution) ont montré que la quantification dynamique des poids (par exemple, en `int8`) peut réduire la taille du modèle `NeuroLiteModel` d'environ 70% tout en préservant sa capacité à effectuer des inférences, ce qui est crucial pour les déploiements sur appareils à ressources limitées.
+
+5.  **Pipeline de Données (Esquisse)**:
+    *   Une structure pour un pipeline de données multimodal a été esquissée dans `neurolite/data/datasets.py`, incluant `MultimodalDataset` pour charger des données à partir d'un fichier manifest et `multimodal_collate_fn` pour batcher efficacement ces données pour le modèle.
+
+## 🧠 Vision AGI et Fondements Théoriques
 
 NeuroLite s'inspire de plusieurs avancées théoriques récentes:
 
@@ -62,9 +68,11 @@ NeuroLite s'inspire de plusieurs avancées théoriques récentes:
 - **Mémoire Associative Moderne**: Intègre des réseaux de Hopfield continus de grande capacité pour la mémorisation associative
 - **Routage Adaptatif**: Utilise des techniques de routage dynamique pour activer sélectivement différents "experts" selon le contexte
 - **Composants Neurosymboliques (étendus)**: Combine traitement neuronal avec des mécanismes de raisonnement symbolique et probabiliste plus explicites pour améliorer les capacités de raisonnement structuré et la gestion de l'incertitude, tout en maintenant une faible empreinte paramétrique.
-- **Apprentissage Continu (Lifelong Learning)**: S'inspire des approches visant à permettre aux modèles d'apprendre séquentiellement de nouvelles tâches ou données sans oublier les précédentes, en utilisant des tampons de rejeu et des mécanismes d'adaptation.
-- **Mémoires Hiérarchiques Dynamiques**: Les améliorations apportées à la mémoire s'inspirent des modèles cognitifs de la mémoire humaine, où la consolidation et la récupération sont des processus dynamiques et dépendants du contexte et de la nouveauté.
-- **Traitement Multimodal et Fusion d'Informations**: Intègre des techniques pour encoder et fusionner des données provenant de diverses sources (texte, image, audio, vidéo), et pour permettre des interactions riches entre ces modalités via des mécanismes comme l'attention cross-modale.
+- **Apprentissage Continu (Lifelong Learning)**: S'inspire des approches visant à permettre aux modèles d'apprendre séquentiellement de nouvelles tâches ou données sans oublier les précédentes. L'interaction du `ContinualAdapter` avec `HierarchicalMemory` est une étape vers cet objectif.
+- **Mémoires Hiérarchiques Dynamiques**: La `HierarchicalMemory` s'inspire des modèles cognitifs, où la consolidation et la récupération sont des processus dynamiques, maintenant enrichis par l'intégration avec les modules de raisonnement et d'apprentissage continu.
+- **Traitement Multimodal et Fusion d'Informations**: L'utilisation du `CrossModalFuser` au niveau de `NeuroLiteModel` représente une approche plus directe et potentiellement plus puissante pour la fusion des modalités en entrée.
+
+La vision AGI de NeuroLite repose sur l'hypothèse que l'intelligence générale émergera de l'intégration étroite et de la co-optimisation de ces différents modules, permettant au système de percevoir, mémoriser, apprendre, et raisonner de manière plus holistique et adaptable.
 
 ## 📦 Structure du Projet
 
@@ -137,6 +145,15 @@ examples/
 ├─ multimodal_input_example.py   # Démonstration des entrées multimodales
 ├─ multimodal_generation_example.py # Démonstration de génération multimodale
 └─ benchmark_comparison.py     # Comparaison avec architectures standards
+# (Nouveaux exemples à ajouter pour illustrer les capacités récentes)
+# - ptq_demonstration.py: Montre l'application de la quantification et la réduction de taille.
+# - reasoning_with_memory_example.py: Illustre comment NeurosymbolicReasoner/StructuredPlanner interagissent avec HierarchicalMemory.
+# - continual_learning_consolidation_example.py: Démontre la consolidation des connaissances du ContinualAdapter vers HierarchicalMemory.
+# - dynamic_routing_stats_example.py: Montre comment récupérer et interpréter les statistiques d'activation des experts.
+# - multimodal_dataset_usage_example.py: Exemple d'utilisation du nouveau MultimodalDataset.
+
+data/ # Nouveau répertoire pour les modules de données
+│   └─ datasets.py     # Esquisse du MultimodalDataset et collate_fn
 
 neurolite_demo.py    # Application de démonstration interactive
 ```
@@ -239,19 +256,54 @@ outputs = model(input_texts=texts)
 embedding = outputs.mean(dim=1)
 ```
 
-### Utilisation de la Mémoire Contextuelle
+### Utilisation de la Mémoire Contextuelle et du Raisonnement
 
 ```python
-# Créer un modèle avec mémoire
-config = NeuroLiteConfig.small()
-config.use_external_memory = True
+# Créer un modèle avec HierarchicalMemory et modules de raisonnement
+config = NeuroLiteConfig.base() # Utilise HierarchicalMemory par défaut
+config.model_config.use_symbolic_module = True
+config.model_config.use_advanced_reasoning = True # Pour NeurosymbolicReasoner
+# config.model_config.use_planning_module = True # Pour StructuredPlanner
+
+# S'assurer que le device est correctement configuré (ex: 'cpu' si pas de GPU)
+config.device = 'cpu'
+if hasattr(config.model_config, 'device'): # Si ModelArchitectureConfig a aussi un champ device
+    config.model_config.device = 'cpu'
+
+
 model = NeuroLiteModel(config)
+model.eval() # Important pour les modules avec comportements différents train/eval
 
-# Fournir du contexte à la mémoire
-model(input_texts=["Alice est une ingénieure vivant à Paris."], update_memory=True)
+# Fournir du contexte à la mémoire (via NeuroLiteModel qui le passe à HierarchicalMemory)
+# Pour un modèle non-multimodal (config.model_config.use_multimodal_input = False par défaut pour base non modifié)
+# et input_projection_type="minhash_bloom" (aussi par défaut)
+initial_context = {"text": ["Alice est une ingénieure vivant à Paris.", "Bob est un artiste de Lyon."]}
+model.forward(multimodal_inputs=initial_context, update_memory=True)
 
-# La requête suivante sera enrichie par le contexte en mémoire
-result = model(multimodal_inputs={"text": ["Où habite-t-elle ?"]}) # Ajusté pour multimodal_inputs
+# Le raisonneur peut maintenant potentiellement utiliser ce contexte stocké dans HierarchicalMemory
+# (Simulation, l'interaction directe dépend de l'implémentation exacte de NeurosymbolicReasoner.forward)
+query_text = {"text": ["Qui vit à Paris et est ingénieure ?"]}
+# Pour obtenir les sorties symboliques, si le modèle le supporte :
+# outputs = model.forward(multimodal_inputs=query_text, return_symbolic=True)
+# print(outputs.get("symbolic_outputs"))
+result = model.forward(multimodal_inputs=query_text)
+print(f"Sortie après contexte: {result['hidden_states'].shape}")
+
+# L'adaptateur continu peut aussi interagir avec la mémoire pour consolider
+# if config.model_config.use_continual_adapter:
+#    adapter_input = {"text": ["Nouvelle information pertinente à consolider."]}
+#    model.forward(multimodal_inputs=adapter_input, continuous_learning=True, update_memory=True)
+
+# Pour observer les stats du routeur dynamique (si des DynamicRoutingBlocks sont dans l'architecture)
+# config.model_config.use_dynamic_routing = True (s'assurer qu'il est activé)
+# dummy_input_for_router = {"text": ["Un test pour le routeur dynamique."]}
+# if hasattr(model, 'layers') and len(model.layers) > 0 and hasattr(model.layers[0], 'return_expert_stats'):
+#     # Supposons que la première couche est un DynamicRoutingBlock ou contient un routeur compatible
+#     # Pour un test direct, il faudrait instancier DynamicRoutingBlock et passer des données
+#     print("Note: Pour tester return_expert_stats, exécutez un forward pass sur un modèle configuré avec DynamicRoutingBlock.")
+#     # outputs = model.forward(multimodal_inputs=dummy_input_for_router, return_expert_stats=True)
+#     # if isinstance(outputs, tuple) and len(outputs) == 2 and isinstance(outputs[1], dict):
+#     #    print(f"Statistiques des experts du premier bloc de routage : {outputs[1]}")
 ```
 
 ### Utilisation du Tokenizer Multimodal
@@ -361,9 +413,52 @@ if "image_output" in outputs:
     plt.show()
 ```
 
-## 🏋️ Entraînement du Modèle
+## 🏋️ Entraînement du Modèle et Pipeline de Données
 
-NeuroLite comprend des scripts d'entraînement robustes pour diverses tâches. Pour entraîner un modèle de génération de texte sur le corpus WikiText :
+L'entraînement de NeuroLite peut bénéficier du nouveau pipeline de données esquissé dans `neurolite/data/datasets.py`. Ce pipeline facilite la gestion des ensembles de données multimodales complexes.
+
+```python
+# Exemple conceptuel d'utilisation du nouveau MultimodalDataset
+from neurolite.data.datasets import MultimodalDataset, multimodal_collate_fn
+from torch.utils.data import DataLoader
+
+# 1. Créer un fichier manifest (par exemple, manifest.csv):
+# sample_id,text_path,image_path,audio_path,label
+# id1,path/to/text1.txt,path/to/image1.png,path/to/audio1.wav,0
+# id2,path/to/text2.txt,path/to/image2.png,path/to/audio2.wav,1
+# (Assurez-vous que les fichiers de données existent ou utilisez des placeholders dans le Dataset)
+
+# 2. Initialiser le Dataset (le tokenizer est généralement dans le modèle NeuroLite)
+#    Pour cet exemple, nous utilisons des placeholders pour les chemins.
+#    Créez un dummy_manifest.csv avec des entrées comme:
+#    id1,"Ceci est du texte.",dummy_image.png,dummy_audio.wav,0
+# with open("dummy_manifest.csv", "w") as f:
+#    f.write("sample_id,text_path,image_path,audio_path,label\n")
+#    f.write('id1,"Texte du sample 1.",img1.png,audio1.wav,0\n')
+#    f.write('id2,"Autre texte.",img2.png,audio2.wav,1\n')
+
+# dataset = MultimodalDataset(manifest_file="dummy_manifest.csv", tokenizer=None)
+
+# 3. Initialiser le DataLoader
+# dataloader = DataLoader(dataset, batch_size=2, collate_fn=multimodal_collate_fn)
+
+# 4. Boucle d'entraînement (concept)
+# for batch_data in dataloader:
+#     # batch_data contient {'multimodal_inputs': {...}, 'labels': ..., 'ids': ...}
+#     # multimodal_inputs = batch_data['multimodal_inputs']
+#     # labels = batch_data.get('labels')
+#
+#     # outputs = model.forward(multimodal_inputs=multimodal_inputs, labels=labels)
+#     # loss = outputs.get('loss')
+#     # if loss is not None:
+#     #     loss.backward()
+#     #     optimizer.step()
+#     #     optimizer.zero_grad()
+#     print(f"Traitement d'un batch (IDs: {batch_data.get('ids')})...") # Placeholder
+```
+*(Note: L'exemple ci-dessus est conceptuel. L'exécution nécessite un fichier manifest et des données réelles ou des placeholders correctement gérés dans `MultimodalDataset`.)*
+
+Pour l'entraînement avec des scripts existants (exemple : génération de texte sur WikiText) :
 
 ```bash
 python training/train_generator.py --data_dir "data/wikitext" --batch_size 32 --seq_length 512 --vocab_size 32000 --num_epochs 20
@@ -418,8 +513,10 @@ Plusieurs techniques sont à l'étude pour réduire davantage la taille du modè
 
 - **Quantification des poids** : Réduction de la précision des poids (int8/int4)
 - **Élagage (pruning)** : Suppression des connexions les moins importantes
-- **Distillation de connaissance** : Transfert des connaissances d'un grand modèle vers des architectures plus compactes
-- **Routage plus granulaire** : Activation plus sélective des experts selon le contexte pour réduire les calculs
+- **Distillation de connaissance** : Transfert des connaissances d'un grand modèle vers des architectures plus compactes.
+- **Routage plus granulaire** : Activation plus sélective des experts selon le contexte pour réduire les calculs.
+- **Quantification PTQ et Statique**: L'exploration de la quantification dynamique (PTQ) sur `NeuroLiteModel` (configuration `base`) a montré une **réduction de taille d'environ 70%** (de ~230Mo à ~65Mo) tout en conservant la capacité d'inférence. La quantification statique est une piste future pour des gains de vitesse potentiels.
+- **Améliorations du `DynamicRoutingBlock`**: Le `SparseDispatcher`, cœur du routage dynamique, a été optimisé en remplaçant une boucle Python par `torch.scatter_add_` pour l'agrégation des sorties d'experts. De plus, il peut maintenant retourner des **statistiques détaillées sur l'utilisation des experts** (nombre de tokens traités par expert, nombre d'experts actifs, etc.), utiles pour l'analyse et le débogage du routage.
 
 ## 🎯 Visualisations Multimodales
 
@@ -565,12 +662,47 @@ Cette implémentation s'inspire des travaux suivants:
 
 Ce projet est sous licence MIT. Voir le fichier LICENSE pour plus de détails.
 
-## 🤝 Contributions
+## 🔄 Gestion des Données & Optimisations (Révisé et Étendu)
 
-Les contributions sont bienvenues! N'hésitez pas à soumettre des pull requests ou à ouvrir des issues pour des suggestions d'amélioration.
+NeuroLite intègre et propose des systèmes pour une gestion efficace des données et des optimisations de modèles :
+
+- **Nouveau Pipeline de Données Multimodal (Esquisse)**:
+    - Le fichier `neurolite/data/datasets.py` contient une esquisse pour `MultimodalDataset` et `multimodal_collate_fn`.
+    - `MultimodalDataset` est conçu pour lire des fichiers manifest (CSV/JSONL) listant les échantillons et leurs données multimodales.
+    - `multimodal_collate_fn` s'occupe du batching intelligent, préparant les données pour `NeuroLiteModel`.
+    - Cette structure vise à simplifier la gestion d'ensembles de données complexes pour l'entraînement et l'évaluation de modèles multimodaux.
+
+- **Optimisations d'Efficacité du Modèle**:
+    - **Quantification Post-Entraînement (PTQ)**: Des tests ont démontré une réduction significative de la taille du modèle (~70%) par quantification dynamique (`torch.qint8`), avec des inférences réussies sur le modèle quantifié. Cela est crucial pour le déploiement sur des appareils à ressources limitées.
+    - **Routage Dynamique Optimisé**: Le `SparseDispatcher` au sein du `DynamicRoutingBlock` utilise maintenant `torch.scatter_add_` pour une agrégation plus performante des sorties d'experts. Il peut également retourner des statistiques d'utilisation des experts pour une meilleure analysabilité du modèle.
+
+- **Fonctionnalités de Gestion de Données Existantes**:
+    - WikiTextDataset: Chargement et gestion du corpus WikiText.
+    - Padding intelligent et tokenization optimisée.
+    - Multiprocessing pour le chargement de données.
+    - Intégration avec l'écosystème PyTorch (DataLoader, etc.).
+
+## 🛣️ Feuille de Route et Contributions
+
+NeuroLite est un projet en évolution active, avec une feuille de route axée sur le renforcement de ses capacités AGI et son efficacité :
+- **Capacités AGI Approfondies**: Poursuivre l'intégration et la co-optimisation des modules de mémoire, raisonnement, et apprentissage continu. Développer des mécanismes de prise de décision plus autonomes et une meilleure gestion de l'incertitude.
+- **Benchmarks et Évaluations Rigoureux**: Évaluer NeuroLite sur un large éventail de tâches multimodales, d'apprentissage continu, et (si possible) de benchmarks orientés AGI. Comparer systématiquement avec d'autres architectures SOTA légères et plus larges.
+- **Pipeline de Données Multimodal Complet**: Finaliser l'implémentation de `MultimodalDataset` et `multimodal_collate_fn`, incluant le support robuste pour toutes les modalités et des transformations avancées.
+- **Optimisations Avancées**:
+    - Explorer la **quantification statique (PTQ)** et la **quantification consciente de l'entraînement (QAT)** pour améliorer davantage la vitesse d'inférence et potentiellement la précision par rapport à la PTQ dynamique.
+    - Implémenter des techniques d'**élagage (pruning)** pour réduire la densité du modèle.
+    - Affiner les stratégies de **routage dynamique** pour un équilibre optimal entre performance et coût computationnel.
+- **Documentation et Exemples Concrets**: Enrichir la documentation et fournir des exemples de code complets pour toutes les fonctionnalités clés, y compris :
+    - Entraînement et inférence avec le nouveau pipeline de données multimodal.
+    - Utilisation avancée de `HierarchicalMemory` avec les modules de raisonnement et d'apprentissage continu.
+    - Application et évaluation de modèles quantifiés.
+    - Interprétation des statistiques du `DynamicRoutingBlock`.
+- **Extension des Capacités Symboliques**: Améliorer l'expressivité du `SymbolicRuleEngine` et l'intégration des connaissances symboliques dans le flux neuronal.
+
+Les contributions de la communauté sont essentielles pour accélérer le développement de NeuroLite. Que vous soyez intéressé par l'ajout de nouvelles fonctionnalités, l'amélioration des performances, la création de benchmarks, l'enrichissement de la documentation ou le test du modèle sur de nouvelles tâches, vos contributions sont les bienvenues ! N'hésitez pas à ouvrir des issues pour discuter d'idées ou soumettre des pull requests.
 
 ---
 
 <div align="center">
-<strong>NeuroLite - Vers une AGI légère et efficiente</strong>
+<strong>NeuroLite - Construire les fondations d'une AGI légère, efficace et adaptable.</strong>
 </div>

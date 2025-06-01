@@ -181,12 +181,13 @@ class NeuroLiteModel(nn.Module):
         if self.model_config.use_external_memory:
             if getattr(self.model_config, 'use_hierarchical_memory', False):
                 self.memory = HierarchicalMemory(
-                    config=self.model_config,  # Pass the model config object
-                    hidden_size=self.model_config.hidden_size,
+                    config=self.config,  # Pass the main NeuroLiteConfig object
+                    hidden_size=self.model_config.hidden_size, # These can stay as they are specific to memory architecture
                     short_term_size=getattr(self.model_config, 'short_term_memory_size', 64),
                     long_term_size=getattr(self.model_config, 'long_term_memory_size', self.model_config.memory_size),
                     persistent_size=getattr(self.model_config, 'persistent_memory_size', 512),
-                    value_size=self.model_config.memory_dim
+                    value_size=self.model_config.memory_dim # This is likely memory_config.memory_dim or model_config.memory_dim
+                    # HierarchicalMemory's __init__ will use config.memory_config for most of these anyway
                 )
             else:
                 # Mémoire originale pour compatibilité
@@ -208,7 +209,8 @@ class NeuroLiteModel(nn.Module):
                     hidden_size=self.model_config.hidden_size,
                     symbolic_dim=getattr(self.model_config, 'symbolic_dim', 64),
                     num_inference_steps=getattr(self.model_config, 'num_inference_steps', 3),
-                    dropout_rate=self.model_config.dropout_rate
+                    dropout_rate=self.model_config.dropout_rate,
+                    memory_system=self.memory if isinstance(self.memory, HierarchicalMemory) else None
                 )
             else:
                 # Module symbolique original pour compatibilité
@@ -238,7 +240,8 @@ class NeuroLiteModel(nn.Module):
                 hidden_size=self.model_config.hidden_size,
                 num_planning_steps=getattr(self.model_config, 'num_planning_steps', 5),
                 plan_dim=getattr(self.model_config, 'plan_dim', 64),
-                dropout_rate=self.model_config.dropout_rate
+                    dropout_rate=self.model_config.dropout_rate,
+                    memory_system=self.memory if isinstance(self.memory, HierarchicalMemory) else None
             )
         else:
             self.planner = None
@@ -266,7 +269,8 @@ class NeuroLiteModel(nn.Module):
                 buffer_size=getattr(self.model_config, 'continual_adapter_buffer_size', 100),
                 adaptation_rate=getattr(self.model_config, 'continual_adapter_rate', 0.1),
                 drift_threshold=getattr(self.model_config, 'continual_adapter_drift_threshold', 0.5),
-                dropout_rate=self.model_config.dropout_rate
+                dropout_rate=self.model_config.dropout_rate,
+                memory_system=self.memory if isinstance(self.memory, HierarchicalMemory) else None
             )
         else:
             self.continual_adapter = None
@@ -281,37 +285,17 @@ class NeuroLiteModel(nn.Module):
             self.progressive_compressor = None
 
         # Attention Cross-Modale (optionnelle)
-        self.cross_modal_attention_text_image = None
-        self.project_text_for_cm_attn = None  # Projection for text features before CM
-        self.project_image_for_cm_attn = None  # Projection for image features before CM
-
+        self.cross_modal_fuser = None
         if getattr(self.model_config, 'use_multimodal_input', False) and \
            getattr(self.model_config, 'use_cross_modal_attention', False):
-            
-            # CrossModalAttention will operate on features of hidden_size
-            cm_interaction_dim = self.model_config.hidden_size 
-            
-            self.cross_modal_attention_text_image = CrossModalAttention(
-                hidden_size=cm_interaction_dim,
+            # This fuser will operate on model_config.hidden_size.
+            # MultimodalProjection's output_dim might be different, requiring projection
+            # handled in the forward pass if self.multimodal_to_hidden_proj exists.
+            self.cross_modal_fuser = CrossModalAttention(
+                hidden_size=self.model_config.hidden_size,
                 num_heads=self.model_config.cross_modal_num_heads,
                 dropout_rate=self.model_config.dropout_rate
             )
-            
-            # Determine if individual modality features need projection to cm_interaction_dim
-            # This is the output dimension of MultimodalProjection's individual modality features
-            multimodal_proj_individual_feature_dim = (
-                self.model_config.multimodal_output_dim 
-                if getattr(self.model_config, 'multimodal_output_dim', 0) > 0 
-                else self.model_config.hidden_size
-            )
-            
-            if multimodal_proj_individual_feature_dim != cm_interaction_dim:
-                # These projections will be used if individual modality features (e.g., text, image)
-                # from MultimodalProjection are not already of cm_interaction_dim (hidden_size).
-                self.project_text_for_cm_attn = nn.Linear(multimodal_proj_individual_feature_dim, cm_interaction_dim)
-                self.project_image_for_cm_attn = nn.Linear(multimodal_proj_individual_feature_dim, cm_interaction_dim)
-            # If multimodal_proj_individual_feature_dim is already cm_interaction_dim (i.e., hidden_size),
-            # then these projection layers will remain None, and original features will be used directly.
             
         # Couches de sortie spécifiques selon le type de tâche
         if task_type == "classification" and num_labels is not None:
@@ -429,25 +413,73 @@ class NeuroLiteModel(nn.Module):
         all_hidden_states = [] if output_hidden_states else None
         individual_modality_representations = None # To store outputs from MultimodalProjection
 
-        if getattr(self.config, 'use_multimodal_input', False):
+        if getattr(self.model_config, 'use_multimodal_input', False):
             if not isinstance(self.input_projection, MultimodalProjection):
                  raise TypeError("Modèle configuré pour entrée multimodale, mais self.input_projection n'est pas MultimodalProjection.")
-            
-            # Call MultimodalProjection and potentially get individual modality representations
-            if getattr(self.config, 'use_cross_modal_attention', False):
-                fused_proj, individual_modality_representations = self.input_projection(
-                    multimodal_inputs, 
-                    return_individual_modalities=True
-                )
-            else:
-                fused_proj = self.input_projection(
-                    multimodal_inputs, 
-                    return_individual_modalities=False
-                )
-            
-            hidden_states = fused_proj.unsqueeze(1) # [Batch, 1, multimodal_output_dim or hidden_size]
-            if self.multimodal_to_hidden_proj is not None:
-                hidden_states = self.multimodal_to_hidden_proj(hidden_states)
+
+            # Always request individual modalities if multimodal input is used.
+            # The decision to use them for cross-attention is separate.
+            fused_proj, individual_modality_representations = self.input_projection(
+                multimodal_inputs,
+                return_individual_modalities=True
+            )
+
+            # Determine the dimension of representations from input_projection's individual modalities
+            # This is multimodal_proj_output_dim (if >0) or model_config.hidden_size
+            # This is the dimension *before* potential projection by self.multimodal_to_hidden_proj
+            current_repr_dim = self.model_config.multimodal_output_dim if \
+                               self.model_config.multimodal_output_dim > 0 else \
+                               self.model_config.hidden_size
+
+            if getattr(self.model_config, 'use_cross_modal_attention', False) and \
+               self.cross_modal_fuser is not None and \
+               individual_modality_representations is not None and \
+               len(individual_modality_representations) > 1:
+
+                active_mod_reprs = [
+                    rep.unsqueeze(1) for rep in individual_modality_representations.values() if rep is not None and torch.any(rep !=0)
+                ] # List of [B, 1, current_repr_dim]
+
+                if len(active_mod_reprs) > 1:
+                    modality_sequence = torch.cat(active_mod_reprs, dim=1) # [B, num_modalities, current_repr_dim]
+
+                    # Project if current_repr_dim is different from self.cross_modal_fuser's expected dim (model_config.hidden_size)
+                    # This is handled by self.multimodal_to_hidden_proj if it exists
+                    if self.multimodal_to_hidden_proj is not None:
+                        # Reshape for Linear: [B * num_modalities, current_repr_dim]
+                        batch_size_seq, num_modalities_seq, _ = modality_sequence.shape
+                        modality_sequence_reshaped = modality_sequence.reshape(-1, current_repr_dim)
+                        projected_sequence = self.multimodal_to_hidden_proj(modality_sequence_reshaped)
+                        modality_sequence_projected = projected_sequence.reshape(batch_size_seq, num_modalities_seq, self.model_config.hidden_size)
+                    elif current_repr_dim == self.model_config.hidden_size:
+                        modality_sequence_projected = modality_sequence
+                    else:
+                        # Edge case: Dimensions mismatch, and no projection layer defined.
+                        # Default to fused_proj, which should already be projected if needed by multimodal_to_hidden_proj
+                        # This case should ideally not be hit if config is consistent.
+                        hidden_states = fused_proj.unsqueeze(1)
+                        if self.multimodal_to_hidden_proj is not None: # Should have been applied to fused_proj too
+                             hidden_states = self.multimodal_to_hidden_proj(hidden_states)
+                        # To prevent further execution in this branch for this scenario:
+                        active_mod_reprs = [] # Force the else branch below for this specific sub-path
+
+                    if len(active_mod_reprs) > 1: # Re-check after potential projection issue
+                        fused_by_attention = self.cross_modal_fuser(
+                            query_modality=modality_sequence_projected,
+                            key_value_modality=modality_sequence_projected
+                        ) # Output: [B, num_modalities, model_config.hidden_size]
+
+                        hidden_states = fused_by_attention.mean(dim=1, keepdim=True) # [B, 1, model_config.hidden_size]
+                    # else: already handled by the re-check logic for active_mod_reprs length
+
+                else: # Only one or zero active modalities came from individual_reprs
+                    hidden_states = fused_proj.unsqueeze(1)
+                    if self.multimodal_to_hidden_proj is not None:
+                         hidden_states = self.multimodal_to_hidden_proj(hidden_states)
+            else: # Cross-modal attention (self.cross_modal_fuser) not used or not applicable
+                hidden_states = fused_proj.unsqueeze(1)
+                if self.multimodal_to_hidden_proj is not None:
+                    hidden_states = self.multimodal_to_hidden_proj(hidden_states)
         else:
             # Mode texte seul: extraire input_texts ou input_ids de multimodal_inputs
             input_texts = multimodal_inputs.get("text")
@@ -479,41 +511,8 @@ class NeuroLiteModel(nn.Module):
         for i, layer_module in enumerate(self.layers): # Renamed 'layer' to 'layer_module' to avoid conflict
             hidden_states = layer_module(hidden_states)
             
-            # Apply Cross-Modal Attention (Example: after the first layer, i.e., i=0)
-            # This placement is conceptual. Optimal placement might vary.
-            if i == 0 and \
-               getattr(self.config, 'use_multimodal_input', False) and \
-               getattr(self.config, 'use_cross_modal_attention', False) and \
-               self.cross_modal_attention_text_image is not None and \
-               individual_modality_representations is not None:
-                
-                # Example: Current hidden_states (query) attends to image features (key/value)
-                # Ensure individual_modality_representations is a dict as expected
-                if isinstance(individual_modality_representations, dict):
-                    image_features_orig = individual_modality_representations.get('image') # [B, multimodal_proj_output_dim]
-                else: # Should not happen if MultimodalProjection is correct
-                    image_features_orig = None
-
-                if image_features_orig is not None:
-                    image_key_value_for_cm = image_features_orig
-                    if self.project_image_for_cm_attn: # If projection layer exists
-                        image_key_value_for_cm = self.project_image_for_cm_attn(image_key_value_for_cm) # [B, hidden_size]
-                    
-                    # Unsqueeze to [B, 1, hidden_size] to act as a sequence of length 1 for key/value
-                    image_key_value_seq = image_key_value_for_cm.unsqueeze(1) 
-                    
-                    if hidden_states.shape[1] > 0: # Ensure query sequence is not empty
-                        # Ensure attention_mask is compatible if needed by CrossModalAttention
-                        # Current CrossModalAttention takes a mask [B, SeqQuery, SeqKV]
-                        # For this example, with SeqKV=1, mask might be [B, SeqQuery, 1] or None
-                        cm_attention_mask = None # Or construct appropriately if needed
-                        
-                        hidden_states = self.cross_modal_attention_text_image(
-                           query_modality=hidden_states,       # [B, SeqLen, hidden_size]
-                           key_value_modality=image_key_value_seq, # [B, 1, hidden_size]
-                           attention_mask=cm_attention_mask
-                        )
-            
+            # The old cross-modal attention logic that was here (applied after layer i=0)
+            # has been removed as the new self.cross_modal_fuser is applied at the input stage.
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
         

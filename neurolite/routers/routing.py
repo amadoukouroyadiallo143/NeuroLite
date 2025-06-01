@@ -193,11 +193,12 @@ class SparseDispatcher(nn.Module):
         # Normalisation et dropout
         self.layer_norm = nn.LayerNorm(output_size)
         self.dropout = nn.Dropout(dropout_rate)
+        self.last_expert_counts = None # For stats
     
     def _compute_assignment(
         self, 
         router_probs: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Calcule l'assignation des tokens aux experts.
         
@@ -278,18 +279,25 @@ class SparseDispatcher(nn.Module):
             dispatching_indices = torch.tensor([], device=router_probs.device, dtype=torch.long)
             expert_indices = torch.tensor([], device=router_probs.device, dtype=torch.long)
             combine_weights = torch.tensor([], device=router_probs.device, dtype=torch.float)
+
+        # For stats: count how many tokens are assigned to each expert
+        expert_counts = torch.zeros(self.num_experts, device=router_probs.device, dtype=torch.long)
+        if expert_indices.numel() > 0: # Ensure expert_indices is not empty
+            expert_counts.scatter_add_(0, expert_indices, torch.ones_like(expert_indices, dtype=torch.long))
         
-        return dispatching_indices, expert_indices, combine_weights
+        return dispatching_indices, expert_indices, combine_weights, expert_counts
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_expert_stats: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
         """
         Passage avant dans le SparseDispatcher
         
         Args:
             x: Tensor d'entrée [batch_size, seq_len, input_size]
+            return_expert_stats: Si True, retourne aussi des statistiques sur l'utilisation des experts.
             
         Returns:
             Tensor transformé [batch_size, seq_len, output_size]
+            ou Tuple (Tensor, Dict) si return_expert_stats est True.
         """
         batch_size, seq_len, _ = x.shape
         
@@ -298,11 +306,20 @@ class SparseDispatcher(nn.Module):
         router_probs = F.softmax(router_logits, dim=-1)
         
         # Calculer l'assignation des tokens aux experts
-        dispatch_idx, expert_idx, combine_weights = self._compute_assignment(router_probs)
-        
+        dispatch_idx, expert_idx, combine_weights, expert_counts = self._compute_assignment(router_probs)
+        self.last_expert_counts = expert_counts # Store for stats
+
         # Si aucun token n'a été assigné (cas rare), retourner des zéros
         if len(dispatch_idx) == 0:
-            return torch.zeros_like(x)
+            output = torch.zeros((batch_size, seq_len, self.output_size), device=x.device, dtype=x.dtype)
+            if return_expert_stats:
+                stats = {
+                    "expert_counts": self.last_expert_counts,
+                    "avg_active_experts_per_token": 0.0, # top_k is effectively 0
+                    "total_tokens_processed": 0
+                }
+                return output, stats
+            return output
         
         # Préparer le tensor de sortie
         output = torch.zeros(
@@ -314,28 +331,51 @@ class SparseDispatcher(nn.Module):
         # Aplatir l'entrée pour faciliter l'indexation
         x_flat = x.reshape(-1, self.input_size)
         
-        # Pour chaque expert, traiter les tokens qui lui sont assignés en batch
-        for expert_i in range(self.num_experts):
-            # Masque des tokens assignés à cet expert
-            expert_mask = (expert_idx == expert_i)
-            if not expert_mask.any():
-                continue
-                
-            # Récupérer les tokens et poids pour cet expert
-            expert_inputs = x_flat[dispatch_idx[expert_mask]]
-            expert_weights = combine_weights[expert_mask]
+        # Optimisation: Utiliser scatter_add_ pour l'agrégation des sorties d'experts
+        # Initialiser output à zéro
+        # output est déjà initialisé à zeros [batch_size * seq_len, self.output_size]
+
+        # Traiter les experts et agréger leurs sorties
+        for i in range(self.num_experts):
+            # Indices des tokens assignés à l'expert i
+            assigned_tokens_indices_for_expert_i = dispatch_idx[expert_idx == i]
             
-            # Passer ces tokens à travers l'expert
-            expert_outputs = self.experts[expert_i](expert_inputs)
-            
-            # Ajouter les sorties pondérées au tensor de sortie
-            for i, (idx, weight) in enumerate(zip(dispatch_idx[expert_mask], expert_weights)):
-                output[idx] += expert_outputs[i] * weight
-        
-        # Reshaper, normaliser et appliquer dropout
+            if assigned_tokens_indices_for_expert_i.numel() > 0:
+                # Récupérer les entrées pour l'expert i
+                expert_inputs = x_flat[assigned_tokens_indices_for_expert_i]
+
+                # Calculer les sorties de l'expert i
+                expert_outputs = self.experts[i](expert_inputs) # [num_assigned_tokens, output_size]
+
+                # Récupérer les poids correspondants
+                current_expert_weights = combine_weights[expert_idx == i].unsqueeze(1) # [num_assigned_tokens, 1]
+
+                # Pondérer les sorties
+                weighted_expert_outputs = expert_outputs * current_expert_weights
+
+                # Agréger en utilisant scatter_add_
+                output.scatter_add_(0, assigned_tokens_indices_for_expert_i.unsqueeze(1).expand_as(weighted_expert_outputs), weighted_expert_outputs)
+
         output = output.reshape(batch_size, seq_len, self.output_size)
-        output = self.layer_norm(output)
-        output = self.dropout(output)
+        output = self.layer_norm(output) # Apply LayerNorm to the combined outputs
+        output = self.dropout(output) # Apply Dropout
+
+        if return_expert_stats:
+            # Calculate total tokens that were actually processed by any expert
+            total_tokens_processed = dispatch_idx.size(0)
+            # avg_active_experts_per_token is essentially self.top_k if tokens are always assigned to top_k experts
+            # A more meaningful stat might be the number of unique experts that got any tokens.
+            num_unique_active_experts = (self.last_expert_counts > 0).sum().item()
+
+            stats = {
+                "expert_token_counts": self.last_expert_counts.cpu().tolist(), # counts per expert
+                "num_unique_active_experts": num_unique_active_experts,
+                "total_tokens_routed": total_tokens_processed,
+                 # Each token is routed to self.top_k experts.
+                "avg_experts_per_token_if_routed": self.top_k if total_tokens_processed > 0 else 0.0,
+                "capacity_per_expert_was": int(batch_size * seq_len * self.capacity_factor / self.num_experts) if self.num_experts > 0 else 0
+            }
+            return output, stats
         
         return output
 
@@ -367,43 +407,55 @@ class DynamicRoutingBlock(nn.Module):
             self.router = SparseDispatcher(
                 input_size=input_size,
                 hidden_size=hidden_size,
-                output_size=input_size,  # Même dimension d'entrée/sortie
+            output_size=input_size,  # Output size is same as input for residual connection
                 num_experts=num_experts,
                 top_k=top_k,
                 activation=activation,
                 dropout_rate=dropout_rate
             )
         else:
+        # Note: MixtureOfExperts has not been updated to return_expert_stats
+        # If it needs to be used with this feature, it would require similar modifications.
             self.router = MixtureOfExperts(
                 input_size=input_size,
                 hidden_size=hidden_size,
-                output_size=input_size,  # Même dimension d'entrée/sortie
+            output_size=input_size,
                 num_experts=num_experts,
                 top_k=top_k,
                 activation=activation,
                 dropout_rate=dropout_rate
             )
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_expert_stats: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
         """
         Passage avant dans le bloc de routage dynamique
         
         Args:
             x: Tensor d'entrée [batch_size, seq_len, input_size]
-            
+            return_expert_stats: Si True, retourne aussi des statistiques sur l'utilisation des experts.
+
         Returns:
             Tensor transformé [batch_size, seq_len, input_size]
+            ou Tuple (Tensor, Dict) si return_expert_stats est True.
         """
-        # Connexion résiduelle
         residual = x
+        x_norm = self.norm(x)
         
-        # Normalisation
-        x = self.norm(x)
+        expert_output_data = {} # To store stats if returned
+
+        if hasattr(self.router, 'forward') and 'return_expert_stats' in self.router.forward.__code__.co_varnames:
+            router_output = self.router(x_norm, return_expert_stats=return_expert_stats)
+            if return_expert_stats:
+                x_routed, expert_output_data = router_output
+            else:
+                x_routed = router_output
+        else: # Fallback if router doesn't support the flag (e.g. unmodified MixtureOfExperts)
+            x_routed = self.router(x_norm)
+            if return_expert_stats: # Provide empty stats
+                 expert_output_data = {"message": "Router does not support expert stats."}
+
+        output = x_routed + residual
         
-        # Routage à travers les experts
-        x = self.router(x)
-        
-        # Ajouter la connexion résiduelle
-        x = x + residual
-        
-        return x
+        if return_expert_stats:
+            return output, expert_output_data
+        return output

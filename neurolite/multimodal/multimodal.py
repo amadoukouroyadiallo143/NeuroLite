@@ -167,117 +167,118 @@ class MultimodalProjection(nn.Module):
         batch_size = self._get_batch_size(inputs)
         device = self._get_device(inputs)
         
-        individual_representations: Dict[str, torch.Tensor] = {}
-        
-        # Initialiser les représentations par modalité
-        # Utiliser des tenseurs nuls par défaut et les remplacer si la modalité est présente
-        text_repr = torch.zeros((batch_size, self.hidden_dim), device=device)
-        image_repr = torch.zeros((batch_size, self.hidden_dim), device=device)
-        audio_repr = torch.zeros((batch_size, self.hidden_dim), device=device)
-        video_repr = torch.zeros((batch_size, self.hidden_dim), device=device)
-        graph_repr = torch.zeros((batch_size, self.hidden_dim), device=device)
-        
-        # Encoder chaque modalité si présente
-        if "text" in inputs and inputs["text"] is not None and len(inputs["text"]) > 0:
-            text_repr = self.text_encoder(inputs["text"])
-            if torch.any(text_repr != 0): 
-                individual_representations["text"] = self.text_projection(text_repr)
-            
-        if "image" in inputs and inputs["image"] is not None:
-            image_repr = self.image_encoder(inputs["image"])
-            if torch.any(image_repr != 0): 
-                individual_representations["image"] = self.image_projection(image_repr)
-            
-        if "audio" in inputs and inputs["audio"] is not None:
-            audio_repr = self.audio_encoder(inputs["audio"])
-            if torch.any(audio_repr != 0): 
-                individual_representations["audio"] = self.audio_projection(audio_repr)
+        batch_size = self._get_batch_size(inputs)
+        device = self._get_device(inputs)
 
+        # Step 1: Encode all modalities to hidden_dim (raw representations)
+        raw_modality_reprs: Dict[str, Optional[torch.Tensor]] = {
+            "text": None, "image": None, "audio": None, "video": None, "graph": None
+        }
+
+        if "text" in inputs and inputs["text"] is not None and len(inputs["text"]) > 0:
+            raw_modality_reprs["text"] = self.text_encoder(inputs["text"])
+        if "image" in inputs and inputs["image"] is not None:
+            raw_modality_reprs["image"] = self.image_encoder(inputs["image"])
+        if "audio" in inputs and inputs["audio"] is not None:
+            raw_modality_reprs["audio"] = self.audio_encoder(inputs["audio"])
         if "video" in inputs and inputs["video"] is not None:
-            video_repr = self.video_encoder(inputs["video"])
-            if torch.any(video_repr != 0): 
-                individual_representations["video"] = self.video_projection(video_repr)
-        
+            raw_modality_reprs["video"] = self.video_encoder(inputs["video"])
         if "graph" in inputs and inputs["graph"] is not None:
             node_features = inputs["graph"].get("node_features")
             adjacency_matrix = inputs["graph"].get("adjacency_matrix")
             node_mask = inputs["graph"].get("node_mask")
-            
             if node_features is not None and adjacency_matrix is not None:
-                graph_repr = self.graph_encoder(node_features, adjacency_matrix, node_mask)
-                if torch.any(graph_repr != 0): 
-                    individual_representations["graph"] = self.graph_projection(graph_repr)
-        
-        # Fusion des modalités
-        # Option 1: Attention croisée pour fusion contextuelle
-        if self.use_cross_attention and len(individual_representations) > 1:
-            # Créer un tensor des représentations disponibles
-            available_reprs = []
-            for modality in ["text", "image", "audio", "video", "graph"]:
-                if modality in individual_representations:
-                    available_reprs.append(individual_representations[modality])
+                raw_modality_reprs["graph"] = self.graph_encoder(node_features, adjacency_matrix, node_mask)
+
+        # Step 2: Apply internal cross-attention if enabled and multiple modalities exist
+        # This cross-attention operates on hidden_dim representations.
+        processed_modality_reprs = raw_modality_reprs.copy()
+
+        active_raw_reprs = {m: r for m, r in raw_modality_reprs.items() if r is not None and torch.any(r != 0)}
+
+        if self.use_cross_attention and len(active_raw_reprs) > 1:
+            # Create a list of tensors for cross-attention input
+            # The order should be consistent (e.g., text, image, audio, video, graph)
+            ordered_active_keys = [m for m in ["text", "image", "audio", "video", "graph"] if m in active_raw_reprs]
             
-            # Si au moins 2 modalités sont disponibles, utiliser l'attention croisée
-            if len(available_reprs) > 1:
-                all_reprs = torch.stack(available_reprs, dim=1)  # [batch, num_modalities, hidden_dim]
-                
-                # Utiliser chaque modalité comme requête pour les autres
-                enhanced_reprs = []
-                for i in range(len(available_reprs)):
-                    query = all_reprs[:, i:i+1, :]  # [batch, 1, hidden_dim]
-                    context = all_reprs  # [batch, num_modalities, hidden_dim]
+            # Tensors for cross-attention, all shaped [batch_size, 1, hidden_dim]
+            # CrossModalAttention expects [batch, seq_len, hidden_size]
+            # Here, each modality is a single "token" in a sequence of modalities.
+            cross_attn_input_list = [active_raw_reprs[key].unsqueeze(1) for key in ordered_active_keys]
+
+            # Stack them to form a sequence of modalities: [batch_size, num_active_modalities, hidden_dim]
+            if len(cross_attn_input_list) > 0:
+                stacked_reprs = torch.cat(cross_attn_input_list, dim=1)
+
+                # Enhance each modality by attending to all others
+                enhanced_repr_list = []
+                for i in range(len(ordered_active_keys)):
+                    query_modality_tensor = stacked_reprs[:, i:i+1, :] # [batch, 1, hidden_dim]
+                    # Key/value is the full stack of modalities
+                    # An attention mask can prevent attending to oneself, though CrossModalAttention's residual connection handles this.
+                    # For simplicity, allow self-attention within this context.
+                    # Or, create a mask:
+                    # mask = torch.ones(batch_size, 1, len(ordered_active_keys), device=device)
+                    # mask[:, :, i] = 0 # Query attends to all others, not itself.
                     
-                    # Créer un masque pour éviter l'auto-attention
-                    attention_mask = torch.ones(1, 1, len(available_reprs), device=device)
-                    attention_mask[0, 0, i] = 0
-                    
-                    enhanced = self.cross_attention(query, context, attention_mask)
-                    enhanced_reprs.append(enhanced.squeeze(1))
+                    # Using self.cross_attention (which takes query, key_value)
+                    # Here, query is one modality, key_value is the set of all modalities
+                    enhanced_modality_tensor = self.cross_attention(query_modality_tensor, stacked_reprs) #, attention_mask=mask)
+                    enhanced_repr_list.append(enhanced_modality_tensor.squeeze(1)) # Back to [batch, hidden_dim]
                 
-                # Mettre à jour les représentations individuelles
-                i = 0
-                for modality in ["text", "image", "audio", "video", "graph"]:
-                    if modality in individual_representations:
-                        individual_representations[modality] = enhanced_reprs[i]
-                        i += 1
-        
-        # Projeter vers l'espace commun final
-        if "text" in individual_representations:
-            individual_representations["text"] = self.text_projection(text_repr)
-        if "image" in individual_representations:
-            individual_representations["image"] = self.image_projection(image_repr)
-        if "audio" in individual_representations:
-            individual_representations["audio"] = self.audio_projection(audio_repr)
-        if "video" in individual_representations:
-            individual_representations["video"] = self.video_projection(video_repr)
-        if "graph" in individual_representations:
-            individual_representations["graph"] = self.graph_projection(graph_repr)
-        
-        # Option 2: Fusion adaptative par gate mechanism
-        # Projeter d'abord les représentations vers l'espace commun
-        text_proj = self.text_projection(text_repr)
-        image_proj = self.image_projection(image_repr)
-        audio_proj = self.audio_projection(audio_repr)
-        video_proj = self.video_projection(video_repr)
-        graph_proj = self.graph_projection(graph_repr)
-        
-        # Concaténer pour le gate mechanism
+                # Update the processed_modality_reprs with enhanced versions
+                for idx, key in enumerate(ordered_active_keys):
+                    processed_modality_reprs[key] = enhanced_repr_list[idx]
+
+        # Step 3: Project all (raw or cross-attended) representations to output_dim
+        # These will be returned as individual_representations if requested
+        final_individual_representations: Dict[str, torch.Tensor] = {}
+        # Initialize with zero tensors in output_dim for fusion gate
+        text_proj = torch.zeros((batch_size, self.output_dim), device=device)
+        image_proj = torch.zeros((batch_size, self.output_dim), device=device)
+        audio_proj = torch.zeros((batch_size, self.output_dim), device=device)
+        video_proj = torch.zeros((batch_size, self.output_dim), device=device)
+        graph_proj = torch.zeros((batch_size, self.output_dim), device=device)
+
+        if processed_modality_reprs["text"] is not None and torch.any(processed_modality_reprs["text"] != 0):
+            text_proj = self.text_projection(processed_modality_reprs["text"])
+            final_individual_representations["text"] = text_proj
+        if processed_modality_reprs["image"] is not None and torch.any(processed_modality_reprs["image"] != 0):
+            image_proj = self.image_projection(processed_modality_reprs["image"])
+            final_individual_representations["image"] = image_proj
+        if processed_modality_reprs["audio"] is not None and torch.any(processed_modality_reprs["audio"] != 0):
+            audio_proj = self.audio_projection(processed_modality_reprs["audio"])
+            final_individual_representations["audio"] = audio_proj
+        if processed_modality_reprs["video"] is not None and torch.any(processed_modality_reprs["video"] != 0):
+            video_proj = self.video_projection(processed_modality_reprs["video"])
+            final_individual_representations["video"] = video_proj
+        if processed_modality_reprs["graph"] is not None and torch.any(processed_modality_reprs["graph"] != 0):
+            graph_proj = self.graph_projection(processed_modality_reprs["graph"])
+            final_individual_representations["graph"] = graph_proj
+
+        # Step 4: Fusion adaptative par gate mechanism using final_individual_representations (all in output_dim)
         combined_input_for_gate = torch.cat(
             [text_proj, image_proj, audio_proj, video_proj, graph_proj], dim=-1
         )
-        fusion_weights = self.fusion_gate(combined_input_for_gate)
+        # Ensure fusion_gate input matches expected (output_dim * 5)
+        if combined_input_for_gate.shape[1] != self.output_dim * 5:
+             # This might happen if some modalities are None and represented by zeros.
+             # The fusion_gate is nn.Linear(output_dim * 5, ...), so it expects this size.
+             # This implies the zero tensors must be correctly sized output_dim.
+             pass # Already handled by initializing *_proj with zeros of output_dim
+
+        fusion_weights_gate = self.fusion_gate(combined_input_for_gate)
         
-        # Fusion pondérée
         fused_repr = (
-            fusion_weights[..., 0:1] * text_proj +
-            fusion_weights[..., 1:2] * image_proj +
-            fusion_weights[..., 2:3] * audio_proj +
-            fusion_weights[..., 3:4] * video_proj +
-            fusion_weights[..., 4:5] * graph_proj
+            fusion_weights_gate[..., 0:1] * text_proj +
+            fusion_weights_gate[..., 1:2] * image_proj +
+            fusion_weights_gate[..., 2:3] * audio_proj +
+            fusion_weights_gate[..., 3:4] * video_proj +
+            fusion_weights_gate[..., 4:5] * graph_proj
         )
         
         if return_individual_modalities:
-            return fused_repr, individual_representations
+            return fused_repr, final_individual_representations
         else:
             return fused_repr
     
