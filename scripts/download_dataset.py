@@ -26,8 +26,8 @@ def download_and_save_dataset():
     # Crée les répertoires parents si nécessaire
     save_path.mkdir(parents=True, exist_ok=True)
     
-    # Charge le jeu de données depuis le Hub
-    dataset = load_dataset(dataset_name)
+    # Charge le jeu de données depuis le Hub, en spécifiant la configuration 'all'
+    dataset = load_dataset(dataset_name, name='all')
     
     print(f"Sauvegarde du jeu de données dans : {save_path}...")
     

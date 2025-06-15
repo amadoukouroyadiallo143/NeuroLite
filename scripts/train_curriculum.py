@@ -117,12 +117,30 @@ def main():
         reasoning_config=reasoning_config
     )
 
-    # --- 2. Initialisation du Tokenizer ---
-    print("Initialisation du NeuroLiteTokenizer...")
-    tokenizer = NeuroLiteTokenizer(config.tokenizer_config, neurolite_config=config)
+    # --- 2. Initialisation et Entraînement/Chargement du Tokenizer ---
+    tokenizer_path = Path(args.output_dir) / "tokenizer"
     
-    # --- 3. Chargement des Données ---
-    print(f"Chargement du dataset depuis {args.dataset_path}...")
+    if tokenizer_path.exists() and (tokenizer_path / "tokenizer_config.json").exists():
+        print(f"Chargement du tokenizer existant depuis {tokenizer_path}...")
+        tokenizer = NeuroLiteTokenizer.from_pretrained(str(tokenizer_path), neurolite_config=config)
+    else:
+        print("Aucun tokenizer existant trouvé. Entraînement d'un nouveau tokenizer...")
+        tokenizer = NeuroLiteTokenizer(config.tokenizer_config, neurolite_config=config)
+        
+        # --- 3. Chargement des Données pour l'entraînement du tokenizer ---
+        print(f"Chargement du dataset depuis {args.dataset_path} pour le tokenizer...")
+        dataset_for_tokenizer = load_from_disk(Path(args.dataset_path))
+        
+        # On utilise tout le dataset disponible pour construire le meilleur vocabulaire possible
+        print("Construction du vocabulaire sur l'ensemble des données...")
+        tokenizer.build_vocab(dataset_for_tokenizer, text_column='text', chat_format=True)
+        
+        print(f"Sauvegarde du nouveau tokenizer dans {tokenizer_path}...")
+        tokenizer_path.mkdir(parents=True, exist_ok=True)
+        tokenizer.save_pretrained(str(tokenizer_path))
+
+    # --- 3. Chargement des Données pour l'entraînement du modèle ---
+    print(f"Chargement du dataset depuis {args.dataset_path} pour l'entraînement du modèle...")
     dataset = load_from_disk(Path(args.dataset_path))
     dataset = dataset.map(preprocess_sft_dataset, num_proc=4)
 
@@ -138,9 +156,8 @@ def main():
     # Il est conçu pour extraire les 'messages' et gérer la complexité.
     print(f"Dataset chargé: {len(train_dataset)} exemples pour l'entraînement.")
 
-    # --- 4. Construction du Vocabulaire et Modèle ---
-    # Le vocabulaire est construit sur le texte complet
-    tokenizer.build_vocab(train_dataset, text_column='text', chat_format=True)
+    # --- 4. Initialisation du Modèle ---
+    # Le vocabulaire est maintenant défini par le tokenizer chargé/entraîné
     config.model_config.mm_text_encoder_config.vocab_size = tokenizer.vocab_size
     if config.model_config.mm_text_decoder_config:
         config.model_config.mm_text_decoder_config.vocab_size = tokenizer.vocab_size
