@@ -248,36 +248,52 @@ class ResidualVQ(nn.Module):
             x: Entrée à quantifier [batch_size, ..., dim]
             
         Returns:
-            quantized: Vecteurs quantifiés [batch_size, ..., dim]
-            indices: Liste des indices de chaque niveau
-            commitment_loss: Perte de commitment totale
+            quantized_sum: Vecteurs quantifiés reconstruits
+            indices: Liste des indices pour chaque quantificateur
+            total_commitment_loss: Perte de commitment agrégée
         """
-        batch_size = x.size(0)
         residual = x
-        total_quantized = torch.zeros_like(x)
-        all_indices = []
+        quantized_sum = torch.zeros_like(x)
+        indices = []
         total_commitment_loss = 0.0
         
-        # Appliquer chaque niveau de quantification
         for i in range(self.num_quantizers):
-            if self.shared_codebook:
-                # Utiliser le codebook partagé
-                quantized, indices, commitment_loss = self.quantizer(residual)
-            else:
-                # Utiliser le codebook spécifique à ce niveau
-                quantized, indices, commitment_loss = self.quantizers[i](residual)
+            quantizer = self.quantizers[i] if not self.shared_codebook else self.quantizer
             
-            # Mettre à jour la sortie quantifiée totale
-            total_quantized = total_quantized + quantized
+            # Quantifier le résidu actuel
+            quantized, current_indices, commitment_loss = quantizer(residual)
             
-            # Calculer le résidu pour le prochain niveau
-            residual = residual - quantized
+            # Mettre à jour le résidu pour le prochain niveau.
+            # On détache le gradient pour éviter des signaux contradictoires.
+            residual = residual - quantized.detach()
             
-            # Collecter les indices et la perte
-            all_indices.append(indices)
-            total_commitment_loss = total_commitment_loss + commitment_loss
+            # Agrégation des résultats
+            quantized_sum = quantized_sum + quantized
+            indices.append(current_indices)
+            total_commitment_loss += commitment_loss
         
-        return total_quantized, all_indices, total_commitment_loss
+        return quantized_sum, indices, total_commitment_loss
+
+    def decode_indices(self, indices: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Reconstruit les vecteurs continus à partir d'une liste d'indices de codebook.
+
+        Args:
+            indices: Liste de tenseurs d'indices (un pour chaque quantificateur).
+
+        Returns:
+            Le vecteur continu reconstruit.
+        """
+        quantized_sum = torch.zeros(indices[0].shape + (self.dim,), device=indices[0].device)
+
+        for i, index_tensor in enumerate(indices):
+            quantizer = self.quantizers[i] if not self.shared_codebook else self.quantizer
+            
+            # Récupérer les embeddings correspondants aux indices
+            quantized = quantizer.embedding(index_tensor)
+            quantized_sum = quantized_sum + quantized
+                
+        return quantized_sum
 
 
 class HierarchicalVQ(nn.Module):

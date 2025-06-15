@@ -187,17 +187,23 @@ class DifferentiableMemory(nn.Module):
     def forward(
         self, 
         hidden_states: torch.Tensor,
-        update_memory: bool = True
-    ) -> torch.Tensor:
+        update_memory: bool = True,
+        attention_mask: Optional[torch.Tensor] = None,
+        keys: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Lecture et mise à jour optionnelle de la mémoire.
         
         Args:
             hidden_states: États cachés d'entrée [batch_size, seq_len, hidden_size]
             update_memory: Si True, met à jour la mémoire avec les nouvelles entrées
+            attention_mask: Masque pour ignorer les tokens de padding.
+            keys: Clés pré-calculées (optionnel). Si non fourni, elles sont générées
+                  à partir de hidden_states.
             
         Returns:
             États cachés augmentés par la mémoire [batch_size, seq_len, hidden_size]
+            Poids d'attention [batch_size, seq_len, memory_size]
         """
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
         
@@ -222,11 +228,23 @@ class DifferentiableMemory(nn.Module):
             memory_keys = self.memory_keys
             memory_values = self.memory_values
         
-        # Générer clés de requête à partir des états cachés
-        query_keys = self.query_projection(hidden_states)
+        # Utiliser les clés fournies ou les générer à partir des états cachés
+        if keys is not None:
+            query_keys = keys
+        else:
+            query_keys = self.query_projection(hidden_states)
         
         # Calcul des poids d'attention entre les requêtes et la mémoire
         attention_weights = self._cosine_attention(query_keys, memory_keys)
+
+        if attention_mask is not None:
+            # Le masque d'attention (batch, seq) doit être étendu pour (batch, seq, mem_size)
+            # On met les scores des tokens masqués à une très petite valeur avant le softmax
+            # Note: _cosine_attention devrait idéalement gérer ça, mais on peut le faire ici aussi
+            # pour être sûr. Si _cosine_attention est modifié, cette partie peut être revue.
+            extended_mask = attention_mask.unsqueeze(-1).expand_as(attention_weights)
+            attention_weights = attention_weights.masked_fill(extended_mask == 0, -1e9)
+            attention_weights = F.softmax(attention_weights, dim=-1) # Re-normaliser après masquage
         
         # Lecture de la mémoire: combinaison pondérée des valeurs mémoire
         # [batch_size, seq_len, memory_size] @ [batch_size, memory_size, value_size]
@@ -282,7 +300,7 @@ class DifferentiableMemory(nn.Module):
         combined = torch.cat([hidden_states, retrieved_memory], dim=-1)
         enhanced_states = self.output_projection(combined)
         
-        return enhanced_states
+        return enhanced_states, attention_weights
         
     def _update_memory_local(
             self, 

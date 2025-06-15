@@ -6,6 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, List, Union, Tuple, Any
+from dataclasses import dataclass
+from ...core.ssm import SSMLayer
+
+from ...Configs.config import MMGraphDecoderConfig
+from .base_decoder import BaseDecoder
 
 
 class GraphDecoderLayer(nn.Module):
@@ -110,85 +115,63 @@ class GraphDecoderLayer(nn.Module):
         return x
 
 
-class GraphDecoder(nn.Module):
+class GraphDecoder(BaseDecoder):
     """
-    Décodeur pour la génération de graphes à partir d'une représentation latente.
+    Décode une représentation latente pour générer un graphe (matrice d'adjacence et caractéristiques des nœuds).
     """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        node_feature_dim: int = 64,
-        hidden_dim: int = 256,
-        max_nodes: int = 32,
-        num_layers: int = 3,
-        num_heads: int = 8,
-        dropout_rate: float = 0.1,
-        use_residual: bool = True
-    ):
+    def __init__(self, config: MMGraphDecoderConfig):
         """
-        Initialise le décodeur de graphes.
+        Initialise le décodeur de graphe.
         
         Args:
-            input_dim: Dimension d'entrée
-            node_feature_dim: Dimension des caractéristiques des nœuds
-            hidden_dim: Dimension cachée
-            max_nodes: Nombre maximum de nœuds
-            num_layers: Nombre de couches de décodeur
-            num_heads: Nombre de têtes d'attention
-            dropout_rate: Taux de dropout
-            use_residual: Si True, utilise des connexions résiduelles
+            config (MMGraphDecoderConfig): La configuration pour le décodeur de graphe.
         """
-        super().__init__()
-        
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.max_nodes = max_nodes
-        self.node_feature_dim = node_feature_dim
+        super().__init__(config)
+        self.config = config
         
         # Projection initiale du vecteur latent
-        self.initial_projection = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim * max_nodes),
-            nn.Dropout(dropout_rate),
-            nn.GELU()
-        )
+        self.initial_projection = nn.Linear(config.input_dim, config.hidden_dim)
         
         # Embedding de position pour les nœuds
-        self.position_embedding = nn.Parameter(torch.zeros(1, max_nodes, hidden_dim))
+        self.position_embedding = nn.Parameter(torch.zeros(1, config.max_nodes, config.hidden_dim))
         nn.init.normal_(self.position_embedding, std=0.02)
         
         # Couches de décodeur
-        self.decoder_layers = nn.ModuleList([
-            GraphDecoderLayer(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                use_residual=use_residual
+        if config.use_ssm_layers:
+            ssm_layers_list = [
+                SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor
+                ) for _ in range(config.num_layers)
+            ]
+            self.decoder_layers = nn.Sequential(*ssm_layers_list)
+        else:
+            # Décodeur basé sur Transformer
+            decoder_layer = nn.TransformerDecoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=config.hidden_dim,
+                dropout=config.dropout_rate,
+                activation="gelu",
+                batch_first=True,
             )
-            for _ in range(num_layers)
-        ])
+            self.decoder_layers = nn.TransformerDecoder(
+                decoder_layer=decoder_layer,
+                num_layers=config.num_layers
+            )
         
-        # Prédiction des caractéristiques des nœuds
-        self.node_feature_predictor = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, node_feature_dim)
-        )
+        # Têtes de prédiction
+        self.node_feature_head = nn.Linear(config.embedding_dim, config.node_feature_dim)
         
         # Prédiction de la matrice d'adjacence
         self.adjacency_predictor = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(config.hidden_dim, 1)
         )
         
-        # Prédiction du masque des nœuds (pour déterminer quels nœuds sont réellement utilisés)
-        self.node_mask_predictor = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        
-        # Initialisation des poids
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
@@ -204,126 +187,87 @@ class GraphDecoder(nn.Module):
     def forward(
         self,
         latent: torch.Tensor,
-        temperature: float = 1.0
+        targets: Optional[Dict[str, torch.Tensor]] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Décode une représentation latente en graphe.
+        Décode une représentation latente en un graphe.
+        Si des cibles sont fournies, calcule aussi la perte.
         
         Args:
-            latent: Représentation latente [batch_size, input_dim]
-            temperature: Température pour la génération
+            latent: Représentation latente [batch_size, input_dim].
+            targets: Dictionnaire contenant les données cibles du graphe:
+                     - 'node_features': [batch_size, max_nodes, node_feature_dim]
+                     - 'adjacency_matrix': [batch_size, max_nodes, max_nodes]
             
         Returns:
-            Dictionnaire contenant:
-                - node_features: Caractéristiques des nœuds [batch_size, max_nodes, node_feature_dim]
-                - adjacency_matrix: Matrice d'adjacence [batch_size, max_nodes, max_nodes]
-                - node_mask: Masque des nœuds [batch_size, max_nodes]
+            Dictionnaire contenant :
+            - 'output': Dictionnaire avec 'node_features' et 'adjacency_matrix' générés.
+            - 'loss': Perte combinée si `targets` est fourni.
+        """
+        generated_graph = self.generate(latent)
+        
+        loss = torch.tensor(0.0, device=latent.device)
+        if targets is not None:
+            # Perte sur les caractéristiques des noeuds (MSE)
+            target_nodes = targets['node_features']
+            pred_nodes = generated_graph['node_features']
+            # S'assurer que les dimensions correspondent
+            if pred_nodes.shape[1] != target_nodes.shape[1]:
+                # Pad/truncate le plus petit
+                min_nodes = min(pred_nodes.shape[1], target_nodes.shape[1])
+                pred_nodes = pred_nodes[:, :min_nodes, :]
+                target_nodes = target_nodes[:, :min_nodes, :]
+            
+            node_loss = F.mse_loss(pred_nodes, target_nodes)
+            
+            # Perte sur la matrice d'adjacence (BCEWithLogitsLoss)
+            target_adj = targets['adjacency_matrix']
+            pred_adj_logits = generated_graph['adjacency_logits']
+            if pred_adj_logits.shape[1] != target_adj.shape[1]:
+                min_nodes = min(pred_adj_logits.shape[1], target_adj.shape[1])
+                pred_adj_logits = pred_adj_logits[:, :min_nodes, :min_nodes]
+                target_adj = target_adj[:, :min_nodes, :min_nodes]
+
+            adj_loss = F.binary_cross_entropy_with_logits(pred_adj_logits, target_adj)
+            
+            loss = node_loss + adj_loss
+        
+        return {
+            'output': generated_graph,
+            'loss': loss
+        }
+
+    @torch.no_grad()
+    def generate(self, latent: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Génère un graphe (caractéristiques de nœuds et matrice d'adjacence)
+        à partir d'un vecteur latent (mode inférence).
         """
         batch_size = latent.shape[0]
         
-        # Projection initiale et reshaping
-        x = self.initial_projection(latent)
-        x = x.view(batch_size, self.max_nodes, self.hidden_dim)
-        
-        # Ajouter les embeddings de position
+        # Projection initiale vers un état global, répété pour chaque noeud potentiel
+        x = self.initial_projection(latent).unsqueeze(1).repeat(1, self.config.max_nodes, 1)
         x = x + self.position_embedding
         
-        # Passer à travers les couches de décodeur
-        for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x)
+        # Raffinage des représentations de noeuds
+        if self.config.use_ssm_layers:
+            x = self.decoder_layers(x)
+        else:
+            for layer in self.decoder_layers:
+                x = layer(x)
         
-        # Prédire les caractéristiques des nœuds
-        node_features = self.node_feature_predictor(x)
+        # Prédiction des caractéristiques des noeuds
+        node_features = self.node_feature_head(x)
         
-        # Prédire le masque des nœuds
-        node_mask = self.node_mask_predictor(x).squeeze(-1)
+        # Prédiction de la matrice d'adjacence
+        x_i = x.unsqueeze(2).repeat(1, 1, self.config.max_nodes, 1)
+        x_j = x.unsqueeze(1).repeat(1, self.config.max_nodes, 1, 1)
+        edge_pairs = torch.cat([x_i, x_j], dim=-1)
         
-        # Prédire la matrice d'adjacence
-        # Créer des paires de représentations de nœuds
-        node_pairs_1 = x.unsqueeze(2).expand(batch_size, self.max_nodes, self.max_nodes, self.hidden_dim)
-        node_pairs_2 = x.unsqueeze(1).expand(batch_size, self.max_nodes, self.max_nodes, self.hidden_dim)
-        node_pairs = torch.cat([node_pairs_1, node_pairs_2], dim=-1)
-        
-        # Aplatir pour passer à travers le prédicteur
-        flat_pairs = node_pairs.view(batch_size * self.max_nodes * self.max_nodes, self.hidden_dim * 2)
-        flat_adjacency = self.adjacency_predictor(flat_pairs).view(batch_size, self.max_nodes, self.max_nodes)
-        
-        # Appliquer la température
-        if temperature != 1.0:
-            flat_adjacency = flat_adjacency / temperature
-        
-        # Convertir en probabilités
-        adjacency_probs = torch.sigmoid(flat_adjacency)
-        
-        # Assurer que la matrice d'adjacence est symétrique
-        adjacency_matrix = (adjacency_probs + adjacency_probs.transpose(1, 2)) / 2
-        
-        # Appliquer le masque des nœuds à la matrice d'adjacence
-        node_mask_matrix = node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
-        adjacency_matrix = adjacency_matrix * node_mask_matrix
+        adj_logits = self.adjacency_predictor(edge_pairs).squeeze(-1)
         
         return {
             "node_features": node_features,
-            "adjacency_matrix": adjacency_matrix,
-            "node_mask": node_mask
+            "adjacency_logits": adj_logits,
+            "adjacency_matrix": torch.sigmoid(adj_logits)
         }
-    
-    def generate(
-        self,
-        latent: torch.Tensor,
-        temperature: float = 1.0,
-        threshold: float = 0.5,
-        noise_level: float = 0.0
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Génère un graphe à partir d'une représentation latente.
-        
-        Args:
-            latent: Représentation latente [batch_size, input_dim]
-            temperature: Contrôle la variabilité des graphes générés
-            threshold: Seuil pour binariser la matrice d'adjacence
-            noise_level: Niveau de bruit ajouté pendant la génération
-            
-        Returns:
-            Dictionnaire contenant:
-                - node_features: Caractéristiques des nœuds [batch_size, num_nodes, node_feature_dim]
-                - adjacency_matrix: Matrice d'adjacence binaire [batch_size, num_nodes, num_nodes]
-                - node_mask: Masque des nœuds [batch_size, num_nodes]
-        """
-        batch_size = latent.shape[0]
-        
-        # Ajouter du bruit au vecteur latent si nécessaire
-        if noise_level > 0:
-            noise = torch.randn_like(latent) * noise_level
-            latent = latent + noise
-        
-        # Générer le graphe
-        graph_data = self.forward(latent, temperature)
-        
-        # Extraire les composants
-        node_features = graph_data["node_features"]
-        adjacency_probs = graph_data["adjacency_matrix"]
-        node_mask = graph_data["node_mask"]
-        
-        # Binariser la matrice d'adjacence
-        adjacency_matrix = (adjacency_probs > threshold).float()
-        
-        # Binariser le masque des nœuds
-        binary_node_mask = (node_mask > threshold).float()
-        
-        # Appliquer le masque binaire
-        node_mask_matrix = binary_node_mask.unsqueeze(1) * binary_node_mask.unsqueeze(2)
-        adjacency_matrix = adjacency_matrix * node_mask_matrix
-        
-        # Compter le nombre réel de nœuds pour chaque graphe
-        num_nodes = binary_node_mask.sum(dim=1).long()
-        
-        # Préparer les résultats
-        result = {
-            "node_features": node_features,
-            "adjacency_matrix": adjacency_matrix,
-            "node_mask": binary_node_mask,
-            "num_nodes": num_nodes
-        }
-        
-        return result

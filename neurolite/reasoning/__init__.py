@@ -9,12 +9,15 @@ Classes principales :
 - StructuredPlanner : Génère et évalue des plans d'action structurés
 """
 
+from .causal import CausalInferenceEngine, CausalGraph
 from .reasoning import (
     NeurosymbolicReasoner,
-    StructuredPlanner
+    StructuredPlanner,
 )
 
 __all__ = [
+    'CausalInferenceEngine',
+    'CausalGraph',
     'NeurosymbolicReasoner',
-    'StructuredPlanner'
+    'StructuredPlanner',
 ]

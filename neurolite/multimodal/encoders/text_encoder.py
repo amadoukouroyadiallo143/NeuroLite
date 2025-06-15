@@ -4,175 +4,120 @@ Encodeur spécialisé pour les entrées textuelles.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import List, Optional, Dict, Union
+import math
+from typing import Union, Optional, Dict
+from torch.nn import functional as F
 
-class TextEncoder(nn.Module):
+from neurolite.core.ssm import SSMLayer
+from neurolite.Configs.config import MMTextEncoderConfig
+from .base_encoder import BaseEncoder
+
+class TextEncoder(BaseEncoder):
     """
-    Encodeur pour les entrées textuelles avec support pour les représentations
-    hash-based et token-based.
+    Encodeur pour les entrées textuelles basé sur la configuration MMTextEncoderConfig.
     """
-    
-    def __init__(
-        self,
-        output_dim: int,
-        vocab_size: int = 50000,
-        embedding_dim: int = 256,
-        hidden_dim: int = 512,
-        num_layers: int = 3,
-        num_heads: int = 8,
-        dropout_rate: float = 0.1,
-        max_seq_length: int = 2048,
-        use_positional_encoding: bool = True,
-        pooling_method: str = "mean"
-    ):
+    def __init__(self, config: MMTextEncoderConfig):
         """
-        Initialise l'encodeur de texte.
-        
-        Args:
-            output_dim: Dimension de sortie
-            vocab_size: Taille du vocabulaire
-            embedding_dim: Dimension des embeddings
-            hidden_dim: Dimension cachée
-            num_layers: Nombre de couches transformer
-            num_heads: Nombre de têtes d'attention
-            dropout_rate: Taux de dropout
-            max_seq_length: Longueur maximale de séquence
-            use_positional_encoding: Si True, utilise l'encodage positionnel
-            pooling_method: Méthode de pooling ("mean", "max", "cls")
+        Initialise l'encodeur de texte à partir d'un objet de configuration.
         """
-        super().__init__()
-        
-        self.output_dim = output_dim
-        self.vocab_size = vocab_size
-        self.embedding_dim = embedding_dim
-        self.max_seq_length = max_seq_length
-        self.pooling_method = pooling_method
-        
+        super().__init__(config)
+        self.config = config
+
         # Embedding de tokens
-        self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
-        
+        self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_dim)
+
         # Encodage positionnel
-        self.use_positional_encoding = use_positional_encoding
-        if use_positional_encoding:
-            self.positional_encoding = nn.Parameter(
-                torch.zeros(1, max_seq_length, embedding_dim)
-            )
-            nn.init.trunc_normal_(self.positional_encoding, std=0.02)
-        
-        # Couche d'encodage basée sur Transformer
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout_rate,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True
+        self.positional_encoding = nn.Parameter(
+            torch.zeros(1, config.max_position_embeddings, config.hidden_dim)
         )
-        
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer,
-            num_layers=num_layers
-        )
-        
-        # Embedding [CLS] pour le pooling de type CLS
-        if pooling_method == "cls":
-            self.cls_embedding = nn.Parameter(torch.zeros(1, 1, embedding_dim))
-            nn.init.trunc_normal_(self.cls_embedding, std=0.02)
-        
-        # Projection de sortie
-        self.output_projection = nn.Sequential(
-            nn.Linear(embedding_dim, output_dim),
-            nn.LayerNorm(output_dim),
-            nn.Dropout(dropout_rate)
-        )
-        
-        # Encodage MinHash pour le texte non tokenisé
-        self.minhash_encoder = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, embedding_dim),
-            nn.LayerNorm(embedding_dim)
-        )
-    
-    def forward(
-        self,
-        inputs: Union[torch.Tensor, List[str]],
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Encode des entrées textuelles.
-        
-        Args:
-            inputs: Entrées textuelles (tokens ids ou texte brut)
-            attention_mask: Masque d'attention
-            
-        Returns:
-            Représentation encodée [batch_size, output_dim]
-        """
-        batch_size = len(inputs) if isinstance(inputs, list) else inputs.shape[0]
-        
-        if isinstance(inputs, list):
-            # Texte brut - utiliser l'encodage MinHash
-            # (Cette partie serait remplacée par un vrai encodage MinHash)
-            # Pour l'instant, on simule l'encodage
-            dummy_embeddings = torch.randn(batch_size, self.embedding_dim, device=self.device())
-            encoded = self.minhash_encoder(dummy_embeddings)
+        self.pos_drop = nn.Dropout(p=config.dropout_rate)
+
+        # Couches d'encodage (SSM ou Transformer)
+        if config.use_ssm:
+            ssm_layers = [
+                SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor,
+                    bidirectional=config.ssm_bidirectional
+                ) for _ in range(config.num_layers)
+            ]
+            self.encoder_layers = nn.Sequential(*ssm_layers)
         else:
-            # IDs de tokens - utiliser l'embedding standard
-            encoded = self.token_embedding(inputs)
-            
-            # Ajouter l'encodage positionnel
-            if self.use_positional_encoding:
-                seq_length = encoded.size(1)
-                encoded = encoded + self.positional_encoding[:, :seq_length, :]
-            
-            # Ajouter le token CLS si nécessaire
-            if self.pooling_method == "cls":
-                cls_tokens = self.cls_embedding.expand(batch_size, 1, -1)
-                encoded = torch.cat([cls_tokens, encoded], dim=1)
-                
-                # Mettre à jour le masque d'attention si fourni
-                if attention_mask is not None:
-                    cls_mask = torch.ones(batch_size, 1, device=encoded.device)
-                    attention_mask = torch.cat([cls_mask, attention_mask], dim=1)
-            
-            # Encodage Transformer
-            if attention_mask is not None:
-                # Convertir le masque d'attention au format requis par TransformerEncoder
-                padding_mask = attention_mask == 0
-                encoded = self.transformer_encoder(encoded, src_key_padding_mask=padding_mask)
-            else:
-                encoded = self.transformer_encoder(encoded)
-            
-            # Pooling
-            if self.pooling_method == "mean":
-                # Pooling moyen sur les tokens non masqués
-                if attention_mask is not None:
-                    encoded = (encoded * attention_mask.unsqueeze(-1)).sum(dim=1)
-                    encoded = encoded / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
-                else:
-                    encoded = encoded.mean(dim=1)
-            elif self.pooling_method == "max":
-                # Pooling max sur les tokens non masqués
-                if attention_mask is not None:
-                    # Masquer les tokens de padding avec une valeur très négative
-                    masked_encoded = encoded.clone()
-                    masked_encoded[~attention_mask.bool().unsqueeze(-1)] = -1e9
-                    encoded = masked_encoded.max(dim=1)[0]
-                else:
-                    encoded = encoded.max(dim=1)[0]
-            elif self.pooling_method == "cls":
-                # Utiliser le token CLS
-                encoded = encoded[:, 0]
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_dim,
+                nhead=config.num_attention_heads,
+                dim_feedforward=int(config.hidden_dim * config.mlp_ratio),
+                dropout=config.dropout_rate,
+                activation=config.activation,
+                batch_first=True,
+                norm_first=True
+            )
+            self.encoder_layers = nn.TransformerEncoder(
+                encoder_layer, num_layers=config.num_layers
+            )
+
+        # Projection de sortie vers la dimension attendue par la couche de fusion
+        self.output_projection = nn.Linear(config.hidden_dim, config.output_dim)
+        self.layer_norm = nn.LayerNorm(config.output_dim, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(p=config.dropout_rate)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialise les poids du modèle."""
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Encode le texte en une représentation dense.
+        Args:
+            inputs: Un dictionnaire contenant:
+                    - 'input_ids': Tenseur d'IDs de tokens [batch_size, seq_length]
+                    - 'attention_mask': Tenseur de masque d'attention [batch_size, seq_length]
+        """
+        input_ids = inputs['input_ids']
+        attention_mask = inputs['attention_mask']
+
+        batch_size, seq_length = input_ids.shape
         
-        # Projection finale
-        output = self.output_projection(encoded)
+        # Créer le masque de padding pour le TransformerEncoder
+        # HuggingFace: 1 = non masqué, 0 = masqué. PyTorch: True = masqué, False = non masqué.
+        padding_mask = (attention_mask == 0)
         
+        # Embedding des tokens et de position
+        x = self.token_embedding(input_ids)
+        x = x + self.positional_encoding[:, :seq_length, :]
+        x = self.pos_drop(x)
+        
+        # Couches d'encodage
+        output = self.encoder_layers(x, src_key_padding_mask=padding_mask)
+
+        # Projection de sortie
+        output = self.output_projection(output)
+        output = self.layer_norm(output)
+        output = self.dropout(output)
+
         return output
-    
-    def device(self):
-        """Retourne le device du modèle."""
-        return next(self.parameters()).device
+
+    def resize_token_embeddings(self, new_num_tokens: int):
+        """
+        Redimensionne la couche d'embedding pour correspondre à un nouveau
+        nombre de tokens.
+        """
+        old_embeddings = self.token_embedding
+        new_embeddings = nn.Embedding(new_num_tokens, self.config.hidden_dim).to(old_embeddings.weight.device)
+        
+        # Copier les anciens poids
+        num_tokens_to_copy = min(old_embeddings.num_embeddings, new_num_tokens)
+        new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
+        
+        self.token_embedding = new_embeddings
+        self.config.vocab_size = new_num_tokens

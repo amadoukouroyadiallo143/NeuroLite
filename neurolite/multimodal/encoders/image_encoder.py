@@ -8,6 +8,10 @@ import torch.nn.functional as F
 from typing import Tuple, Optional, List, Dict, Union
 import math
 
+from neurolite.core.ssm import SSMLayer # Added import
+from neurolite.Configs.config import MMImageEncoderConfig
+from .base_encoder import BaseEncoder
+
 class PatchEmbedding(nn.Module):
     """
     Module de découpage d'image en patches et projection.
@@ -94,96 +98,69 @@ class PatchEmbedding(nn.Module):
         return x
 
 
-class ImageEncoder(nn.Module):
+class ImageEncoder(BaseEncoder):
     """
-    Encodeur pour les entrées d'images, basé sur une architecture Vision Transformer.
+    Encodeur pour les entrées d'images, basé sur une architecture Vision Transformer
+    ou SSM, configuré via MMImageEncoderConfig.
     """
-    
-    def __init__(
-        self,
-        output_dim: int,
-        image_size: int = 224,
-        patch_size: int = 16,
-        in_channels: int = 3,
-        embed_dim: int = 768,
-        depth: int = 12,
-        num_heads: int = 12,
-        mlp_ratio: float = 4.0,
-        dropout_rate: float = 0.1,
-        attn_dropout_rate: float = 0.0,
-        use_cls_token: bool = True,
-        pooling_method: str = "cls"
-    ):
+    def __init__(self, config: MMImageEncoderConfig):
         """
-        Initialise l'encodeur d'images.
-        
-        Args:
-            output_dim: Dimension de sortie
-            image_size: Taille de l'image (supposée carrée)
-            patch_size: Taille des patches (supposés carrés)
-            in_channels: Nombre de canaux d'entrée (3 pour RGB)
-            embed_dim: Dimension des embeddings
-            depth: Nombre de couches transformer
-            num_heads: Nombre de têtes d'attention
-            mlp_ratio: Ratio pour la dimension du MLP
-            dropout_rate: Taux de dropout
-            attn_dropout_rate: Taux de dropout pour l'attention
-            use_cls_token: Si True, ajoute un token CLS pour le pooling
-            pooling_method: Méthode de pooling ("mean", "max", "cls")
+        Initialise l'encodeur d'images à partir d'un objet de configuration.
         """
-        super().__init__()
-        
-        self.output_dim = output_dim
-        self.use_cls_token = use_cls_token
-        self.pooling_method = pooling_method
-        self.embed_dim = embed_dim
-        
-        # Embedding des patches
+        super().__init__(config)
+        self.config = config
+
         self.patch_embed = PatchEmbedding(
-            image_size=image_size,
-            patch_size=patch_size,
-            in_channels=in_channels,
-            embed_dim=embed_dim
+            image_size=config.image_size,
+            patch_size=config.patch_size,
+            in_channels=config.num_channels,
+            embed_dim=config.hidden_dim
         )
         
-        # Nombre de patches
-        self.num_patches = self.patch_embed.num_patches
+        num_patches = self.patch_embed.num_patches
         
-        # Embeddings positionnels
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + (1 if use_cls_token else 0), embed_dim))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches + (1 if config.use_cls_token else 0), config.hidden_dim)
+        )
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         
-        # Token CLS
-        if use_cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        if config.use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_dim))
             nn.init.trunc_normal_(self.cls_token, std=0.02)
         
-        # Dropout
-        self.pos_drop = nn.Dropout(p=dropout_rate)
+        self.pos_drop = nn.Dropout(p=config.dropout_rate)
         
-        # Couches Transformer
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=int(embed_dim * mlp_ratio),
-            dropout=dropout_rate,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True
-        )
+        if config.use_ssm:
+            ssm_layers = [
+                SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor,
+                    bidirectional=config.ssm_bidirectional
+                ) for _ in range(config.num_layers)
+            ]
+            self.encoder_layers = nn.Sequential(*ssm_layers)
+        else:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_dim,
+                nhead=config.num_attention_heads,
+                dim_feedforward=int(config.hidden_dim * config.mlp_ratio),
+                dropout=config.dropout_rate,
+                activation=config.activation,
+                batch_first=True,
+                norm_first=True
+            )
+            self.encoder_layers = nn.TransformerEncoder(
+                encoder_layer=encoder_layer,
+                num_layers=config.num_layers
+            )
         
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer,
-            num_layers=depth
-        )
-        
-        # Projection de sortie
         self.output_projection = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, output_dim)
+            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(config.hidden_dim, config.output_dim)
         )
         
-        # Initialisation des poids
         self.apply(self._init_weights)
     
     def _init_weights(self, m):
@@ -212,7 +189,7 @@ class ImageEncoder(nn.Module):
         x = self.patch_embed(x)  # [B, num_patches, embed_dim]
         
         # Ajouter le token CLS si nécessaire
-        if self.use_cls_token:
+        if self.config.use_cls_token:
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # [B, 1, embed_dim]
             x = torch.cat([cls_tokens, x], dim=1)  # [B, 1 + num_patches, embed_dim]
         
@@ -220,24 +197,16 @@ class ImageEncoder(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
         
-        # Transformer encoder
-        x = self.transformer_encoder(x)
+        # Encoder layers (Transformer or SSM)
+        x = self.encoder_layers(x)
         
         # Pooling
-        if self.pooling_method == "cls" and self.use_cls_token:
-            x = x[:, 0]  # Prendre le token CLS
-        elif self.pooling_method == "mean":
-            if self.use_cls_token:
-                x = x[:, 1:].mean(dim=1)  # Exclure le token CLS
-            else:
-                x = x.mean(dim=1)
-        elif self.pooling_method == "max":
-            if self.use_cls_token:
-                x = x[:, 1:].max(dim=1)[0]  # Exclure le token CLS
-            else:
-                x = x.max(dim=1)[0]
-        
+        if self.config.use_cls_token:
+            x = x[:, 0]
+        else:
+            x = x.mean(dim=1)
+            
         # Projection finale
-        x = self.output_projection(x)
+        output = self.output_projection(x)
         
-        return x
+        return output

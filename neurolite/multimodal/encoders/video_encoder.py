@@ -7,123 +7,72 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Union
 
+from neurolite.Configs.config import MMVideoEncoderConfig, MMImageEncoderConfig
+from .base_encoder import BaseEncoder
 from .image_encoder import ImageEncoder
+from neurolite.core.ssm import SSMLayer # Added import
 
 
-class VideoEncoder(nn.Module):
+class VideoEncoder(BaseEncoder):
     """
-    Encodeur pour les entrées vidéo.
+    Encodeur pour les entrées vidéo, configuré via MMVideoEncoderConfig.
     Combine un encodeur d'images par trame avec un traitement temporel.
     """
-    
-    def __init__(
-        self,
-        output_dim: int,
-        image_size: int = 224,
-        patch_size: int = 16,
-        in_channels: int = 3,
-        embed_dim: int = 768,
-        image_encoder_depth: int = 12,
-        temporal_depth: int = 4,
-        num_heads: int = 12,
-        mlp_ratio: float = 4.0,
-        dropout_rate: float = 0.1,
-        attn_dropout_rate: float = 0.0,
-        temporal_model: str = "transformer",
-        max_frames: int = 32,
-        temporal_stride: int = 1,
-        frame_pooling_method: str = "cls",
-        temporal_pooling_method: str = "mean"
-    ):
+    def __init__(self, config: MMVideoEncoderConfig):
         """
-        Initialise l'encodeur vidéo.
-        
-        Args:
-            output_dim: Dimension de sortie
-            image_size: Taille des images (supposées carrées)
-            patch_size: Taille des patches (supposés carrés)
-            in_channels: Nombre de canaux d'entrée (3 pour RGB)
-            embed_dim: Dimension des embeddings
-            image_encoder_depth: Nombre de couches transformer pour l'encodeur d'image
-            temporal_depth: Nombre de couches transformer pour le traitement temporel
-            num_heads: Nombre de têtes d'attention
-            mlp_ratio: Ratio pour la dimension du MLP
-            dropout_rate: Taux de dropout
-            attn_dropout_rate: Taux de dropout pour l'attention
-            temporal_model: Type de modèle temporel ("transformer", "lstm", "gru")
-            max_frames: Nombre maximum de trames
-            temporal_stride: Stride pour l'échantillonnage des trames
-            frame_pooling_method: Méthode de pooling pour les trames ("mean", "max", "cls")
-            temporal_pooling_method: Méthode de pooling temporel ("mean", "max", "last")
+        Initialise l'encodeur vidéo à partir d'un objet de configuration.
         """
-        super().__init__()
+        super().__init__(config)
+        self.config = config
+
+        # L'encodeur d'image interne est configuré pour sortir la `hidden_dim`
+        # qui sert d'entrée à l'encodeur temporel.
+        image_encoder_internal_config = config.image_encoder_config
+        image_encoder_internal_config.output_dim = config.hidden_dim
+
+        self.image_encoder = ImageEncoder(config=image_encoder_internal_config)
         
-        self.output_dim = output_dim
-        self.max_frames = max_frames
-        self.temporal_stride = temporal_stride
-        self.temporal_model = temporal_model
-        self.temporal_pooling_method = temporal_pooling_method
-        
-        # Encodeur d'image (pour traiter chaque trame individuellement)
-        self.image_encoder = ImageEncoder(
-            output_dim=embed_dim,  # Pas de projection finale pour l'instant
-            image_size=image_size,
-            patch_size=patch_size,
-            in_channels=in_channels,
-            embed_dim=embed_dim,
-            depth=image_encoder_depth,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            dropout_rate=dropout_rate,
-            attn_dropout_rate=attn_dropout_rate,
-            use_cls_token=True,
-            pooling_method=frame_pooling_method
+        # Embeddings positionnels temporels
+        self.temporal_pos_embed = nn.Parameter(
+            torch.zeros(1, config.num_frames_input, config.hidden_dim)
         )
+        nn.init.trunc_normal_(self.temporal_pos_embed, std=0.02)
         
-        # Encodage temporel (pour intégrer la dimension temporelle)
-        if temporal_model == "transformer":
-            # Embeddings positionnels temporels
-            self.temporal_pos_embed = nn.Parameter(torch.zeros(1, max_frames, embed_dim))
-            nn.init.trunc_normal_(self.temporal_pos_embed, std=0.02)
-            
-            # Dropout
-            self.pos_drop = nn.Dropout(p=dropout_rate)
-            
-            # Transformer pour le traitement temporel
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=embed_dim,
-                nhead=num_heads,
-                dim_feedforward=int(embed_dim * mlp_ratio),
-                dropout=dropout_rate,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True
+        self.pos_drop = nn.Dropout(p=config.dropout_rate)
+        
+        # Transformer ou SSM pour le traitement temporel
+        if config.temporal_use_ssm:
+            ssm_layers = [
+                SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor,
+                    bidirectional=config.ssm_bidirectional
+                ) for _ in range(config.temporal_num_layers)
+            ]
+            self.temporal_encoder = nn.Sequential(*ssm_layers)
+        else:
+            temporal_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.hidden_dim,
+            nhead=config.temporal_num_attention_heads,
+            dim_feedforward=int(config.hidden_dim * config.temporal_mlp_ratio),
+            dropout=config.dropout_rate,
+            activation=config.activation,
+            batch_first=True,
+            norm_first=True
             )
-            
             self.temporal_encoder = nn.TransformerEncoder(
-                encoder_layer=encoder_layer,
-                num_layers=temporal_depth
-            )
-        
-        elif temporal_model in ["lstm", "gru"]:
-            # RNN bidirectionnelle
-            rnn_class = nn.LSTM if temporal_model == "lstm" else nn.GRU
-            self.temporal_encoder = rnn_class(
-                input_size=embed_dim,
-                hidden_size=embed_dim // 2,  # divisé par 2 car bidirectionnel
-                num_layers=temporal_depth,
-                batch_first=True,
-                bidirectional=True,
-                dropout=dropout_rate if temporal_depth > 1 else 0
+                    encoder_layer=temporal_encoder_layer,
+                num_layers=config.temporal_num_layers
             )
         
         # Projection de sortie
         self.output_projection = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, output_dim)
+            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(config.hidden_dim, config.output_dim)
         )
         
-        # Initialisation des poids
         self.apply(self._init_weights)
     
     def _init_weights(self, m):
@@ -161,117 +110,53 @@ class VideoEncoder(nn.Module):
         num_frames = x.shape[1]
         
         # Limiter le nombre de trames et appliquer le stride
-        if self.temporal_stride > 1:
-            indices = torch.arange(0, num_frames, self.temporal_stride, device=x.device)
+        if self.config.temporal_stride > 1:
+            indices = torch.arange(0, num_frames, self.config.temporal_stride, device=x.device)
             x = x[:, indices]
             if attention_mask is not None:
                 attention_mask = attention_mask[:, indices]
         
-        if x.shape[1] > self.max_frames:
-            x = x[:, :self.max_frames]
+        if x.shape[1] > self.config.num_frames_input:
+            x = x[:, :self.config.num_frames_input]
             if attention_mask is not None:
-                attention_mask = attention_mask[:, :self.max_frames]
+                attention_mask = attention_mask[:, :self.config.num_frames_input]
         
-        num_frames = min(num_frames, self.max_frames)
+        num_frames = min(num_frames, self.config.num_frames_input)
         
         # Fusionner batch et frames pour traitement par l'encodeur d'image
         b, f, c, h, w = x.shape
         x = x.reshape(b * f, c, h, w)
         
-        # Obtenir la taille d'image attendue par l'encodeur d'image
-        expected_size = getattr(self.image_encoder, 'image_size', 224)
-        
-        # Redimensionner automatiquement si nécessaire
-        if h != expected_size or w != expected_size:
-            import torch.nn.functional as F
-            x = F.interpolate(x, size=(expected_size, expected_size), mode='bilinear', align_corners=False)
-            print(f"Redimensionnement automatique des frames vidéo de {h}x{w} à {expected_size}x{expected_size}")
-        
         # Encoder chaque trame individuellement
-        x = self.image_encoder(x)  # [b*f, embed_dim]
+        x = self.image_encoder(x)  # [b*f, hidden_dim]
         
         # Reformer le batch avec dimension temporelle
-        x = x.reshape(b, f, -1)  # [b, f, embed_dim]
+        x = x.reshape(b, f, -1)  # [b, f, hidden_dim]
         
-        # Traitement temporel
-        if self.temporal_model == "transformer":
-            # Ajouter les embeddings positionnels temporels
-            seq_len = x.size(1)
-            x = x + self.temporal_pos_embed[:, :seq_len, :]
-            x = self.pos_drop(x)
+        # Ajouter les embeddings positionnels temporels
+        seq_len = x.size(1)
+        x = x + self.temporal_pos_embed[:, :seq_len, :]
+        x = self.pos_drop(x)
             
-            # Encodage transformer
-            if attention_mask is not None:
-                # Convertir le masque d'attention au format requis par TransformerEncoder
+        # Encodage temporel (Transformer ou SSM)
+        if attention_mask is not None:
+            # Pour le Transformer, le masque est `src_key_padding_mask`
+            if isinstance(self.temporal_encoder, nn.TransformerEncoder):
                 padding_mask = (attention_mask == 0)
                 x = self.temporal_encoder(x, src_key_padding_mask=padding_mask)
-            else:
+            else: # Pour le SSM ou autre, on suppose qu'il n'y a pas de masque
                 x = self.temporal_encoder(x)
+        else:
+            x = self.temporal_encoder(x)
             
-            # Pooling temporel
-            if self.temporal_pooling_method == "mean":
-                if attention_mask is not None:
-                    x = (x * attention_mask.unsqueeze(-1)).sum(dim=1)
-                    x = x / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
-                else:
-                    x = x.mean(dim=1)
-            elif self.temporal_pooling_method == "max":
-                if attention_mask is not None:
-                    masked_x = x.clone()
-                    masked_x[~attention_mask.bool().unsqueeze(-1)] = -1e9
-                    x = masked_x.max(dim=1)[0]
-                else:
-                    x = x.max(dim=1)[0]
-            elif self.temporal_pooling_method == "last":
-                if attention_mask is not None:
-                    # Prendre la dernière trame non masquée
-                    last_indices = attention_mask.sum(dim=1, keepdim=True).long() - 1
-                    last_indices = last_indices.clamp(min=0)
-                    x = x.gather(1, last_indices.unsqueeze(-1).expand(-1, -1, x.size(-1))).squeeze(1)
-                else:
-                    x = x[:, -1]
-        
-        elif self.temporal_model in ["lstm", "gru"]:
-            # Traitement RNN
-            if attention_mask is not None:
-                # Créer un pack_padded_sequence pour le RNN
-                lengths = attention_mask.sum(dim=1).cpu()
-                x = nn.utils.rnn.pack_padded_sequence(
-                    x, lengths, batch_first=True, enforce_sorted=False
-                )
-            
-            # Passage dans le RNN
-            if self.temporal_model == "lstm":
-                x, (hidden, _) = self.temporal_encoder(x)
-            else:  # GRU
-                x, hidden = self.temporal_encoder(x)
-            
-            if attention_mask is not None:
-                # Décompresser le résultat
-                x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
-            
-            # Pooling
-            if self.temporal_pooling_method == "mean":
-                if attention_mask is not None:
-                    x = (x * attention_mask.unsqueeze(-1)).sum(dim=1)
-                    x = x / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
-                else:
-                    x = x.mean(dim=1)
-            elif self.temporal_pooling_method == "max":
-                if attention_mask is not None:
-                    masked_x = x.clone()
-                    masked_x[~attention_mask.bool().unsqueeze(-1)] = -1e9
-                    x = masked_x.max(dim=1)[0]
-                else:
-                    x = x.max(dim=1)[0]
-            elif self.temporal_pooling_method == "last":
-                # Utiliser le dernier état caché
-                if isinstance(hidden, tuple):  # LSTM
-                    hidden = hidden[0]
-                # Combiner les directions (2, batch, hidden) -> (batch, hidden*2)
-                x = torch.cat([hidden[-2], hidden[-1]], dim=1)
+        # Pooling temporel (moyenne)
+        if attention_mask is not None:
+            pooled_output = (x * attention_mask.unsqueeze(-1)).sum(dim=1)
+            pooled_output = pooled_output / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        else:
+            pooled_output = x.mean(dim=1)
         
         # Projection finale
-        x = self.output_projection(x)
+        output = self.output_projection(pooled_output)
         
-        return x
+        return output

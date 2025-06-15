@@ -6,6 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Union
+
+from neurolite.core.ssm import SSMLayer # Added import
+from neurolite.Configs.config import MMAudioEncoderConfig
+from .base_encoder import BaseEncoder
 import math
 
 
@@ -196,122 +200,67 @@ class AudioFeatureExtractor(nn.Module):
             return spec
 
 
-class AudioEncoder(nn.Module):
+class AudioEncoder(BaseEncoder):
     """
-    Encodeur pour les entrées audio, basé sur une architecture Transformer.
+    Encodeur pour les entrées audio, basé sur une architecture Transformer ou SSM,
+    configuré via MMAudioEncoderConfig.
     """
-    
-    def __init__(
-        self,
-        output_dim: int,
-        sample_rate: int = 16000,
-        n_fft: int = 400,
-        hop_length: int = 160,
-        n_mels: int = 80,
-        feature_type: str = "mel_spectrogram",
-        embed_dim: int = 512,
-        depth: int = 6,
-        num_heads: int = 8,
-        mlp_ratio: float = 4.0,
-        dropout_rate: float = 0.1,
-        max_audio_length_ms: int = 30000,
-        use_feature_projection: bool = True,
-        pooling_method: str = "mean"
-    ):
+    def __init__(self, config: MMAudioEncoderConfig):
         """
-        Initialise l'encodeur audio.
-        
-        Args:
-            output_dim: Dimension de sortie
-            sample_rate: Taux d'échantillonnage audio
-            n_fft: Taille de la FFT
-            hop_length: Nombre d'échantillons entre trames consécutives
-            n_mels: Nombre de bandes mel
-            feature_type: Type de caractéristique ("mel_spectrogram", "mfcc", "raw_spectrogram")
-            embed_dim: Dimension des embeddings
-            depth: Nombre de couches transformer
-            num_heads: Nombre de têtes d'attention
-            mlp_ratio: Ratio pour la dimension du MLP
-            dropout_rate: Taux de dropout
-            max_audio_length_ms: Durée maximale de l'audio en millisecondes
-            use_feature_projection: Si True, projette les caractéristiques
-            pooling_method: Méthode de pooling ("mean", "max", "attention")
+        Initialise l'encodeur audio à partir d'un objet de configuration.
         """
-        super().__init__()
+        super().__init__(config)
+        self.config = config
         
-        self.output_dim = output_dim
-        self.sample_rate = sample_rate
-        self.hop_length = hop_length
-        self.pooling_method = pooling_method
-        self.max_frames = int((max_audio_length_ms / 1000) * sample_rate / hop_length)
-        
-        # Extraction de caractéristiques audio
         self.feature_extractor = AudioFeatureExtractor(
-            sample_rate=sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            feature_type=feature_type
+            sample_rate=config.sampling_rate,
+            n_fft=config.n_fft,
+            hop_length=config.hop_length,
+            n_mels=config.n_mels,
+            feature_type="mel_spectrogram"
         )
         
-        # Nombre de caractéristiques
-        if feature_type == "mel_spectrogram":
-            feature_dim = n_mels
-        elif feature_type == "mfcc":
-            feature_dim = self.feature_extractor.n_mfcc
-        else:  # "raw_spectrogram"
-            feature_dim = n_fft // 2 + 1
+        self.feature_projection = nn.Linear(config.n_mels, config.hidden_dim)
         
-        # Projection des caractéristiques
-        if use_feature_projection:
-            self.feature_projection = nn.Sequential(
-                nn.Linear(feature_dim, embed_dim),
-                nn.LayerNorm(embed_dim),
-                nn.Dropout(dropout_rate)
-            )
-        else:
-            assert feature_dim == embed_dim, f"Feature dimension ({feature_dim}) must match embed_dim ({embed_dim}) when use_feature_projection=False"
-            self.feature_projection = nn.Identity()
-        
-        # Embeddings positionnels
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.max_frames, embed_dim))
+        max_frames = (config.max_audio_length_ms // 1000) * (config.sampling_rate // config.hop_length)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_frames, config.hidden_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        self.pos_drop = nn.Dropout(p=config.dropout_rate)
         
-        # Dropout
-        self.pos_drop = nn.Dropout(p=dropout_rate)
-        
-        # Couches Transformer
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=int(embed_dim * mlp_ratio),
-            dropout=dropout_rate,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True
-        )
-        
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer,
-            num_layers=depth
-        )
-        
-        # Attention pooling
-        if pooling_method == "attention":
-            self.attention_pool = nn.Sequential(
-                nn.Linear(embed_dim, 1),
-                nn.Softmax(dim=1)
+        if config.use_ssm:
+            ssm_layers = [
+                SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor,
+                    bidirectional=config.ssm_bidirectional
+                ) for _ in range(config.num_layers)
+            ]
+            self.encoder_layers = nn.Sequential(*ssm_layers)
+        else:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.hidden_dim,
+                nhead=config.num_attention_heads,
+                dim_feedforward=int(config.hidden_dim * config.mlp_ratio),
+                dropout=config.dropout_rate,
+                activation=config.activation,
+                batch_first=True,
+                norm_first=True
             )
-        
-        # Projection de sortie
+            self.encoder_layers = nn.TransformerEncoder(
+                encoder_layer=encoder_layer,
+                num_layers=config.num_layers
+            )
+            
         self.output_projection = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, output_dim)
+            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(config.hidden_dim, config.output_dim)
         )
         
-        # Initialisation des poids
         self.apply(self._init_weights)
-    
+
     def _init_weights(self, m):
         """Initialise les poids du modèle."""
         if isinstance(m, nn.Linear):
@@ -349,62 +298,35 @@ class AudioEncoder(nn.Module):
                 x = x.mean(dim=1)  # [batch_size, time]
         
         # Extraire les caractéristiques audio
-        features = self.feature_extractor(x)  # [batch_size, n_features, time]
+        x = self.feature_extractor(x)
+        x = x.transpose(1, 2)
+        x = self.feature_projection(x)
         
-        # Transposer pour le format attendu par le Transformer
-        features = features.transpose(1, 2)  # [batch_size, time, n_features]
-        
-        # Limiter la longueur de séquence
-        if features.size(1) > self.max_frames:
-            features = features[:, :self.max_frames, :]
-            if attention_mask is not None:
-                attention_mask = attention_mask[:, :self.max_frames]
-        
-        # Projeter les caractéristiques
-        x = self.feature_projection(features)
-        
-        # Ajouter les embeddings positionnels (ajuster à la longueur actuelle)
         seq_len = x.size(1)
         x = x + self.pos_embed[:, :seq_len, :]
-        
-        # Dropout
         x = self.pos_drop(x)
         
-        # Encodage Transformer
         if attention_mask is not None:
-            # Convertir le masque d'attention au format requis par TransformerEncoder
-            padding_mask = (attention_mask == 0)
-            x = self.transformer_encoder(x, src_key_padding_mask=padding_mask)
+            # S'assurer que le masque a la bonne taille
+            if attention_mask.size(1) > seq_len:
+                attention_mask = attention_mask[:, :seq_len]
+            elif attention_mask.size(1) < seq_len:
+                # Pad le masque si nécessaire
+                pad_size = seq_len - attention_mask.size(1)
+                attention_mask = F.pad(attention_mask, (0, pad_size), "constant", 1)
+
+            padding_mask = attention_mask == 0
+            x = self.encoder_layers(x, src_key_padding_mask=padding_mask)
         else:
-            x = self.transformer_encoder(x)
-        
+            x = self.encoder_layers(x)
+            
         # Pooling
-        if self.pooling_method == "mean":
-            # Pooling moyen sur les trames non masquées
-            if attention_mask is not None:
-                x = (x * attention_mask.unsqueeze(-1)).sum(dim=1)
-                x = x / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
-            else:
-                x = x.mean(dim=1)
-        elif self.pooling_method == "max":
-            # Pooling max sur les trames non masquées
-            if attention_mask is not None:
-                # Masquer les trames de padding avec une valeur très négative
-                masked_x = x.clone()
-                masked_x[~attention_mask.bool().unsqueeze(-1)] = -1e9
-                x = masked_x.max(dim=1)[0]
-            else:
-                x = x.max(dim=1)[0]
-        elif self.pooling_method == "attention":
-            # Pooling par attention pondérée
-            weights = self.attention_pool(x)
-            if attention_mask is not None:
-                # Masquer les trames de padding
-                weights = weights * attention_mask.unsqueeze(-1)
-                weights = weights / weights.sum(dim=1, keepdim=True).clamp(min=1e-9)
-            x = (weights * x).sum(dim=1)
+        if attention_mask is not None:
+            masked_x = x * attention_mask.unsqueeze(-1)
+            pooled_output = masked_x.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        else:
+            pooled_output = x.mean(dim=1)
+            
+        output = self.output_projection(pooled_output)
         
-        # Projection finale
-        x = self.output_projection(x)
-        
-        return x
+        return output

@@ -195,8 +195,36 @@ class BaseConfig:
     
     @classmethod
     def from_dict(cls: Type[T], config_dict: Dict[str, Any]) -> T:
-        """Crée une configuration à partir d'un dictionnaire."""
-        return cls(**config_dict)
+        """
+        Crée une instance de configuration (dataclass) à partir d'un dictionnaire,
+        en gérant récursivement les dataclasses imbriquées.
+        """
+        # Créer une copie pour éviter de modifier le dictionnaire original
+        config_dict = deepcopy(config_dict)
+
+        # Itérer sur les champs de la dataclass cible
+        for field_info in fields(cls):
+            field_name = field_info.name
+            field_type = field_info.type
+            
+            # Gérer les types 'Optional' (Union[T, None])
+            is_optional = hasattr(field_type, '__origin__') and field_type.__origin__ is Union
+            if is_optional:
+                # Extraire le type réel, ex: de Optional[MMImageEncoderConfig] on veut MMImageEncoderConfig
+                actual_type = next((t for t in field_type.__args__ if t is not type(None)), None)
+            else:
+                actual_type = field_type
+
+            # Si le champ est une dataclass et que nous avons un dictionnaire pour lui...
+            if hasattr(actual_type, '__dataclass_fields__') and field_name in config_dict and isinstance(config_dict[field_name], dict):
+                # ...appeler récursivement from_dict pour créer l'instance imbriquée
+                config_dict[field_name] = actual_type.from_dict(config_dict[field_name])
+
+        # Filtrer les clés du dictionnaire pour ne garder que celles qui sont des champs de la dataclass
+        valid_keys = {f.name for f in fields(cls)}
+        filtered_dict = {k: v for k, v in config_dict.items() if k in valid_keys}
+
+        return cls(**filtered_dict)
     
     def update(self, **kwargs):
         """Met à jour les paramètres de configuration."""
@@ -236,14 +264,14 @@ class TrainingConfig(BaseConfig):
     # Chemins des données
     train_data_path: str = "data/processed/train"
     val_data_path: str = "data/processed/val"
-    output_dir: str = "models/checkpoints"
+    output_dir: str = "./outputs"
     logging_dir: str = "logs"
     
     # Paramètres d'entraînement
-    num_train_epochs: int = 10
+    num_train_epochs: int = 3
     per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 8
-    warmup_steps: int = 1000
+    warmup_steps: int = 0
     weight_decay: float = 0.01
     learning_rate: float = 5e-5
     max_grad_norm: float = 1.0
@@ -254,9 +282,9 @@ class TrainingConfig(BaseConfig):
     fp16_opt_level: str = "O1"
     
     # Fréquences
-    save_steps: int = 1000
+    save_steps: int = 500
     eval_steps: int = 500
-    logging_steps: int = 100
+    logging_steps: int = 50
     save_total_limit: int = 3
     
     # Chargement du meilleur modèle
@@ -269,32 +297,9 @@ class TrainingConfig(BaseConfig):
         default_factory=lambda: ["accuracy", "f1", "precision", "recall"]
     )
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit la configuration en dictionnaire."""
-        return {
-            'train_data_path': self.train_data_path,
-            'val_data_path': self.val_data_path,
-            'output_dir': self.output_dir,
-            'logging_dir': self.logging_dir,
-            'num_train_epochs': self.num_train_epochs,
-            'per_device_train_batch_size': self.per_device_train_batch_size,
-            'per_device_eval_batch_size': self.per_device_eval_batch_size,
-            'warmup_steps': self.warmup_steps,
-            'weight_decay': self.weight_decay,
-            'learning_rate': self.learning_rate,
-            'max_grad_norm': self.max_grad_norm,
-            'gradient_accumulation_steps': self.gradient_accumulation_steps,
-            'fp16': self.fp16,
-            'fp16_opt_level': self.fp16_opt_level,
-            'save_steps': self.save_steps,
-            'eval_steps': self.eval_steps,
-            'logging_steps': self.logging_steps,
-            'save_total_limit': self.save_total_limit,
-            'load_best_model_at_end': self.load_best_model_at_end,
-            'metric_for_best_model': self.metric_for_best_model,
-            'greater_is_better': self.greater_is_better,
-            'metrics': self.metrics
-        }
+    lr_scheduler_type: str = "linear"
+    num_warmup_steps: int = 0
+    evaluation_strategy: str = "steps"  # "steps" ou "epoch"
 
 
 @dataclass
@@ -313,19 +318,6 @@ class LoggingConfig(BaseConfig):
     wandb_watch: bool = False
     wandb_log_model: bool = False
     log_level: str = "info"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit la configuration en dictionnaire.
-        
-        Returns:
-            Dict[str, Any]: Dictionnaire contenant la configuration sérialisée
-        """
-        output = {}
-        for field_name in self.__dataclass_fields__:
-            field_value = getattr(self, field_name, None)
-            if field_value is not None:
-                output[field_name] = self._convert_to_serializable(field_value)
-        return output
 
 
 @dataclass
@@ -339,7 +331,7 @@ class TokenizerEncoderConfig(BaseConfig):
 
 
 @dataclass
-class TextEncoderConfig(TokenizerEncoderConfig):
+class TextEncoderConfig(TokenizerEncoderConfig):    
     """Configuration pour l'encodeur de texte."""
     vocab_size: int = 50000
     max_position_embeddings: int = 2048
@@ -397,6 +389,348 @@ class GraphEncoderConfig(TokenizerEncoderConfig):
     max_num_nodes: int = 512
     max_num_edges: int = 2048
 
+@dataclass
+class MMEncoderConfigBase(BaseConfig):
+    """Configuration de base pour les encodeurs de MultimodalProjection."""
+    num_layers: int = 4
+    hidden_dim: int = 256 # Dimension interne de l'encodeur spécifique à la modalité
+    output_dim: int = 512 # Dimension de sortie projetée (peut être différent de hidden_dim du modèle global)
+    num_attention_heads: int = 4
+    mlp_ratio: float = 4.0
+    dropout_rate: float = 0.1
+    activation: str = "gelu"
+    layer_norm_eps: float = 1e-6
+    use_ssm: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    ssm_dt_rank: Union[int, str] = 'auto'
+    ssm_bias: bool = False
+    ssm_conv_bias: bool = True
+    ssm_bidirectional: bool = False
+
+@dataclass
+class MMTextEncoderConfig(MMEncoderConfigBase):
+    """Configuration spécifique pour l'encodeur de texte multimodal."""
+    vocab_size: int = 32000
+    max_position_embeddings: int = 2048
+
+@dataclass
+class MMImageEncoderConfig(MMEncoderConfigBase):
+    """Configuration spécifique pour l'encodeur d'image multimodal."""
+    image_size: int = 224
+    patch_size: int = 16
+    num_channels: int = 3
+    use_cls_token: bool = True
+
+@dataclass
+class MMAudioEncoderConfig(MMEncoderConfigBase):
+    """Configuration spécifique pour l'encodeur audio multimodal."""
+    sampling_rate: int = 16000
+    n_mels: int = 80
+    n_fft: int = 400
+    hop_length: int = 160
+    max_audio_length_ms: int = 30000
+
+@dataclass
+class MMVideoEncoderConfig(MMEncoderConfigBase):
+    """Configuration spécifique pour l'encodeur vidéo multimodal."""
+    image_encoder_config: MMImageEncoderConfig = field(default_factory=MMImageEncoderConfig)
+    num_frames_input: int = 16
+    temporal_patch_size: int = 2
+    temporal_num_layers: int = 2
+    temporal_num_attention_heads: int = 4
+    temporal_mlp_ratio: float = 4.0
+    temporal_use_ssm: bool = False
+
+@dataclass
+class MMGraphEncoderConfig(MMEncoderConfigBase):
+    """Configuration spécifique pour l'encodeur de graphe multimodal."""
+    node_feature_dim: int = 128
+    edge_feature_dim: Optional[int] = 64
+    num_node_types: int = 10
+    num_edge_types: int = 5
+    gnn_type: str = "GAT"
+    pooling_method: str = "mean" # Options: "mean", "attention"
+
+@dataclass
+class MMDecoderConfigBase(BaseConfig):
+    """Configuration de base pour les décodeurs de MultimodalGeneration."""
+    num_layers: int = 4
+    hidden_dim: int = 256
+    input_dim: int = 512
+    num_attention_heads: int = 4
+    mlp_ratio: float = 4.0
+    dropout_rate: float = 0.1
+    activation: str = "gelu"
+    layer_norm_eps: float = 1e-6
+    use_ssm: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    ssm_dt_rank: Union[int, str] = 'auto'
+    ssm_bias: bool = False
+    ssm_conv_bias: bool = True
+    ssm_bidirectional: bool = False
+
+@dataclass
+class MMTextDecoderConfig(MMDecoderConfigBase):
+    """Configuration spécifique pour le décodeur de texte multimodal."""
+    name: str = "text_decoder"
+    input_dim: int = 512
+    embedding_dim: int = 256
+    hidden_dim: int = 1024 # dim_feedforward
+    vocab_size: int = 32000
+    max_seq_len: int = 512
+    num_heads: int = 4 # n_head
+    num_layers: int = 4 # n_layers
+    dropout_rate: float = 0.1 # dropout
+    use_positional_encoding: bool = True
+    use_ssm_layers: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    output_activation: str = "softmax"
+    pad_token_id: int = 0
+    bos_token_id: int = 1
+    eos_token_id: int = 2
+
+@dataclass
+class MMImageDecoderConfig(MMDecoderConfigBase):
+    """Configuration spécifique pour le décodeur d'image multimodal."""
+    name: str = "image_decoder"
+    input_dim: int = 256
+    embedding_dim: int = 256
+    hidden_dim: int = 1024
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout_rate: float = 0.1
+    use_positional_encoding: bool = True
+    use_ssm_layers: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    patch_size: int = 16
+    initial_size: int = 7
+    initial_channels: int = 256
+    output_channels: int = 3
+    num_upsamples: int = 5
+    use_residual: bool = True
+    final_activation: str = "sigmoid"
+    target_image_size: int = 224
+
+@dataclass
+class MMAudioDecoderConfig(MMDecoderConfigBase):
+    """Configuration spécifique pour le décodeur audio multimodal."""
+    name: str = "audio_decoder"
+    input_dim: int = 256
+    embedding_dim: int = 256
+    hidden_dim: int = 1024
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout_rate: float = 0.1
+    use_positional_encoding: bool = True
+    use_ssm_layers: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    initial_length: int = 16
+    initial_channels: int = 256
+    output_channels: int = 1
+    num_upsamples: int = 5
+    use_residual: bool = True
+    n_mels: int = 80
+    upsample_strides: tuple = (4, 4)
+    final_activation: str = "tanh"
+    target_sampling_rate: int = 16000
+    output_length: int = 32000 # Ajout pour la génération
+
+@dataclass
+class MMVideoDecoderConfig(MMDecoderConfigBase):
+    """Configuration spécifique pour le décodeur vidéo multimodal."""
+    name: str = "video_decoder"
+    input_dim: int = 256
+    embedding_dim: int = 256
+    hidden_dim: int = 1024
+    num_heads: int = 4
+    num_temporal_layers: int = 2
+    num_spatial_layers: int = 4
+    dropout_rate: float = 0.1
+    use_positional_encoding: bool = True
+    use_ssm_layers: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    max_frames: int = 32
+    image_decoder_config: MMImageDecoderConfig = field(default_factory=MMImageDecoderConfig)
+    
+    # Dimensions de la représentation latente projetée
+    initial_channels: int = 256
+    initial_time: int = 4
+    initial_size: int = 4
+
+    # Paramètres des blocs de suréchantillonnage
+    num_temporal_upsamples: int = 2
+    num_spatial_upsamples: int = 4
+    use_residual: bool = True
+
+    # Paramètres de sortie
+    output_channels: int = 3
+    output_time: int = 16
+    output_size: int = 224
+    final_activation: str = "tanh" # "tanh", "sigmoid", ou "identity"
+
+
+@dataclass
+class MMGraphDecoderConfig(MMDecoderConfigBase):
+    """Configuration spécifique pour le décodeur de graphe multimodal."""
+    name: str = "graph_decoder"
+    input_dim: int = 256
+    embedding_dim: int = 256
+    hidden_dim: int = 1024
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout_rate: float = 0.1
+    use_positional_encoding: bool = True
+    use_ssm_layers: bool = False
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    max_nodes: int = 100
+    node_feature_dim: int = 128
+    use_residual: bool = True # Ajout pour les couches de décodeur
+    output_activation_nodes: str = "linear"
+    target_edge_feature_dim: Optional[int] = 64
+    max_edges_output: int = 100
+    generation_strategy: str = "autoregressive_node_edge"
+
+
+@dataclass
+class TokenizerConfig(BaseConfig):
+    """Configuration complète pour le NeuroLiteTokenizer."""
+    # --- Configuration générale ---
+    hidden_size: int = 512
+    tokenizer_type: str = 'bpe'
+
+    # --- Configuration du Tokenizer de texte (BPE) ---
+    vocab_size: int = 32000
+
+    # --- Configuration des modules multimodaux ---
+    projection_dropout: float = 0.1
+    
+    # --- Configuration du compresseur (NeuralCompressor & ResidualVQ) ---
+    compressor_bottleneck_dim: int = 256
+    num_quantizers: int = 4
+    codebook_size: int = 1024
+    commitment_weight: float = 0.25
+    ema_decay: float = 0.99
+
+    # --- Poids pour la fonction de perte du tokenizer ---
+    reconstruction_weight: float = 1.0
+    alignment_weight: float = 0.1
+    contrastive_temperature: float = 0.1
+
+
+@dataclass
+class ModelArchitectureConfig(BaseConfig):
+    """Configuration de l'architecture du modèle."""
+    hidden_size: int = 256
+    num_hidden_layers: int = 12
+    num_attention_heads: int = 12
+    intermediate_size: int = 1024
+    max_seq_length: int = 512
+    
+    # --- Flags pour les modules principaux ---
+    use_metacontroller: bool = False
+    use_causal_reasoning: bool = False
+    use_multimodal_input: bool = False
+    use_external_memory: bool = False
+    use_hierarchical_memory: bool = False
+    use_dynamic_routing: bool = False
+    use_ssm_layers: bool = False
+    use_fnet_layers: bool = False
+
+    # --- Paramètres des modules ---
+    # SSM
+    ssm_layer_indices: Optional[List[int]] = None
+    ssm_layer_frequency: Optional[int] = None
+    ssm_d_state: int = 16
+    ssm_d_conv: int = 4
+    ssm_expand_factor: int = 2
+    # FNet
+    fnet_layer_indices: Optional[List[int]] = None
+    fnet_layer_frequency: Optional[int] = None
+    # Dynamic Routing (MoE)
+    num_experts: int = 4
+    routing_top_k: int = 2
+    # Memory
+    memory_size: int = 64
+    memory_dim: int = 256
+    short_term_memory_size: int = 32
+    long_term_memory_size: int = 64
+    persistent_memory_size: int = 128
+    # Multimodal
+    multimodal_output_dim: Optional[int] = None
+    multimodal_hidden_dim: int = 256
+    use_cross_modal_attention: bool = True
+    cross_modal_num_heads: int = 8
+    attention_probs_dropout_prob: float = 0.1
+    dropout_rate: float = 0.1
+    layer_norm_epsilon: float = 1e-6
+    activation: str = "gelu"
+    token_mixing_hidden_size: int = 512
+    channel_mixing_hidden_size: int = 1024
+
+    # --- Flags et paramètres pour les modules de raisonnement ---
+    use_symbolic_module: bool = False
+    use_advanced_reasoning: bool = False
+    use_bayesian_module: bool = False
+    use_planning_module: bool = False
+    symbolic_dim: int = 64
+    num_inference_steps: int = 3
+    symbolic_rules_file: Optional[str] = None
+    num_bayesian_variables: int = 0 # Mettre à 0 pour désactiver
+    num_planning_steps: int = 5
+    plan_dim: int = 64
+
+    # --- Flags et paramètres pour l'apprentissage continu ---
+    use_continual_adapter: bool = False
+    adapter_bottleneck_dim: int = 64  # Nouvelle valeur, dimension du bottleneck dans l'adaptateur
+    task_embedding_dim: int = 16    # Nouvelle valeur, dimension de l'embedding de tâche
+
+    # Configurations granulaires pour les encodeurs multimodaux
+    mm_text_encoder_config: Optional[MMTextEncoderConfig] = None
+    mm_image_encoder_config: Optional[MMImageEncoderConfig] = None
+    mm_audio_encoder_config: Optional[MMAudioEncoderConfig] = None
+    mm_video_encoder_config: Optional[MMVideoEncoderConfig] = None
+    mm_graph_encoder_config: Optional[MMGraphEncoderConfig] = None
+
+    # Configurations granulaires pour les décodeurs multimodaux (si génération multimodale activée)
+    mm_text_decoder_config: Optional[MMTextDecoderConfig] = None
+    mm_image_decoder_config: Optional[MMImageDecoderConfig] = None
+    mm_audio_decoder_config: Optional[MMAudioDecoderConfig] = None
+    mm_video_decoder_config: Optional[MMVideoDecoderConfig] = None
+    mm_graph_decoder_config: Optional[MMGraphDecoderConfig] = None
+
+    def __post_init__(self):
+        """Re-instancie récursivement les dataclasses à partir des dictionnaires."""
+        for field_name, field_type in self.__annotations__.items():
+            current_value = getattr(self, field_name)
+            
+            # Le type est souvent une Union (ex: Optional[MMTextConfig]), il faut trouver le bon type
+            actual_type = None
+            if hasattr(field_type, '__args__'):
+                # Trouver le premier type non-None dans Union[... , NoneType]
+                possible_types = [t for t in field_type.__args__ if t is not type(None)]
+                if possible_types:
+                    actual_type = possible_types[0]
+            else:
+                actual_type = field_type
+
+            if isinstance(current_value, dict) and actual_type and hasattr(actual_type, '__dataclass_fields__'):
+                new_value = actual_type(**current_value)
+                setattr(self, field_name, new_value)
+
 
 @dataclass
 class QuantizerConfig(BaseConfig):
@@ -411,499 +745,186 @@ class QuantizerConfig(BaseConfig):
 
 
 @dataclass
-class TokenizerConfig(BaseConfig):
-    """Configuration principale pour le tokenizer multimodal NeuroLite."""
-    # Paramètres généraux du tokenizer
-    semantic_vocab_size: int = 8192
-    detail_vocab_size: int = 32768
-    hidden_size: int = 768
-    dropout_rate: float = 0.1
-    
-    # Paramètres pour le codebook et la quantification vectorielle
-    use_residual_vq: bool = True        # Utiliser la quantification vectorielle résiduelle
-    num_residual_layers: int = 3        # Nombre de couches résiduelles pour la quantification
-    use_dual_codebook: bool = True      # Utiliser un double codebook (sémantique et détails)
-    hierarchical_levels: int = 3        # Niveaux hiérarchiques pour la tokenization
-    commitment_weight: float = 0.25     # Poids pour la perte d'engagement
-    use_context_modulation: bool = True # Utiliser la modulation contextuelle
-    modality_alignment_weight: float = 0.5 # Poids pour l'alignement des modalités
-    commitment_cost: float = 0.25       # Coût d'engagement pour VQ-VAE
-    
-    # Dimensions pour chaque modalité
-    modality_dims: Dict[str, int] = field(default_factory=lambda: {
-            'text': 512,
-            'image': 768,
-            'audio': 512,
-            'video': 1024,
-            'graph': 512
-        })
-    
-    # Configurations spécifiques aux encodeurs
-    text_encoder_config: TextEncoderConfig = field(default_factory=TextEncoderConfig)
-    vision_encoder_config: ImageEncoderConfig = field(default_factory=ImageEncoderConfig)
-    audio_encoder_config: AudioEncoderConfig = field(default_factory=AudioEncoderConfig)
-    video_encoder_config: VideoEncoderConfig = field(default_factory=VideoEncoderConfig)
-    graph_encoder_config: GraphEncoderConfig = field(default_factory=GraphEncoderConfig)
-    
-    # Paramètres d'alignement entre modalités
-    alignment_dim: int = 768
-    num_alignment_heads: int = 8
-    alignment_dropout: float = 0.1
-    initial_temperature: float = 0.07
-    
-    # Paramètres pour la hiérarchie du tokenizer
-    level_vocab_sizes: List[int] = field(default_factory=lambda: [8192, 4096, 2048])
-    level_dims: List[int] = field(default_factory=lambda: [768, 384, 192])
-    level_commitment_costs: List[float] = field(default_factory=lambda: [0.25, 0.5, 1.0])
-    num_hierarchy_levels: int = 3        # Alias pour hierarchical_levels (rétrocompatibilité)
-    
-    # Paramètres pour les relations entre tokens
-    relation_hidden_dim: int = 512
-    num_relation_types: int = 16
-    
-    # Paramètres du compresseur neural
-    input_dim: int = 768
-    bottleneck_dim: int = 192
-    num_quantizers: int = 4
-    codebook_size: int = 8192
-    shared_codebook: bool = False
-    ema_decay: float = 0.99
-    
-    # Paramètres d'entraînement
-    learning_rate: float = 1e-4
-    weight_decay: float = 0.01
-    warmup_steps: int = 10000
-    total_steps: int = 1000000
-    num_epochs: int = 50
-    reconstruction_weight: float = 1.0
-    contrastive_weight: float = 0.5      # Poids pour la perte contrastive
-    max_grad_norm: float = 1.0
-    contrastive_temperature: float = 0.07
-    
-    # Chemin vers un tokenizer pré-entraîné
-    pretrained_tokenizer_path: Optional[str] = None
-
-
-@dataclass
-class ModelArchitectureConfig(BaseConfig):
-    """Configuration de l'architecture du modèle.
-    
-    Attributes:
-        hidden_size: Dimension des couches cachées
-        num_hidden_layers: Nombre de couches cachées
-        num_attention_heads: Nombre de têtes d'attention
-        intermediate_size: Taille des couches intermédiaires
-        hidden_dropout_prob: Taux de dropout des couches cachées
-        attention_probs_dropout_prob: Taux de dropout des probabilités d'attention
-        max_position_embeddings: Longueur maximale des séquences
-        type_vocab_size: Taille du vocabulaire des types de tokens
-        initializer_range: Écart type de l'initialisation
-        layer_norm_eps: Epsilon pour la normalisation de couche
-    """
-    # Configuration générale
-    hidden_size: int = 256
-    num_hidden_layers: int = 12
-    num_attention_heads: int = 12
-    intermediate_size: int = 3072
-    hidden_dropout_prob: float = 0.1
-    attention_probs_dropout_prob: float = 0.1
-    max_position_embeddings: int = 512
-    type_vocab_size: int = 2
-    initializer_range: float = 0.02
-    layer_norm_eps: float = 1e-12
-    max_seq_length: int = 512
-    
-    # Configuration de l'encodeur d'entrée
-    input_projection_type: str = "minhash_bloom"  # ["minhash_bloom", "ngram_hash"]
-    minhash_num_permutations: int = 128
-    bloom_filter_size: int = 512
-    vocab_size: int = 30000  # Seulement utilisé pour les tokens classiques si nécessaire
-    
-    # Configuration MLP-Mixer
-    num_mixer_layers: int = 6
-    token_mixing_hidden_size: int = 512
-    channel_mixing_hidden_size: int = 1024
-    dropout_rate: float = 0.1
-    layer_norm_epsilon: float = 1e-6
-    activation: str = "gelu"  # ["gelu", "relu", "silu"]
-    
-    # Configuration mémoire externe
-    use_external_memory: bool = True
-    memory_size: int = 64
-    memory_dim: int = 256
-    memory_update_rate: float = 0.1
-    memory_levels: int = 3
-    
-    # Configuration spécifique pour la mémoire hiérarchique
-    use_hierarchical_memory: bool = True
-    short_term_memory_size: int = 32
-    long_term_memory_size: int = 64
-    persistent_memory_size: int = 128
-    novelty_threshold_stm: float = 0.7
-    novelty_threshold_ltm: float = 0.5
-    
-    # Configuration routage dynamique
-    use_dynamic_routing: bool = True
-    num_experts: int = 4
-    routing_top_k: int = 2
-    
-    # Configuration de l'adaptateur d'apprentissage continu
-    use_continual_adapter: bool = False
-    continual_adapter_buffer_size: int = 100
-    continual_adapter_rate: float = 0.1
-    continual_adapter_drift_threshold: float = 0.5
-    continual_adapter_dropout_rate: float = 0.1
-    continual_adapter_num_experts: int = 4
-    continual_adapter_routing_top_k: int = 2
-    continual_adapter_routing_hidden_size: int = 256
-    continual_adapter_routing_activation: str = "gelu"
-    continual_adapter_routing_layer_norm_epsilon: float = 1e-6
-    
-    # Configuration pour l'entrée multimodale
-    use_multimodal_input: bool = False
-    use_cross_modal_attention: bool = True
-    cross_modal_num_heads: int = 8
-    multimodal_hidden_dim: int = 768
-    multimodal_output_dim: int = 0  # Si 0, utilise hidden_size
-    multimodal_image_patch_size: int = 16
-    multimodal_video_num_sampled_frames: int = 5
-    
-    # Configuration module symbolique
-    use_symbolic_module: bool = False
-    symbolic_rules_file: Optional[str] = None
-    max_predicate_types: int = 50
-    max_entities_in_vocab: int = 200
-    
-    # Configuration Réseau Bayésien
-    use_bayesian_module: bool = False
-    num_bayesian_variables: int = 10
-    bayesian_network_structure: Optional[List[Tuple[int, int]]] = None
-    
-    # Configuration quantification
-    quantization: Optional[Dict[str, Any]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convertit la configuration en dictionnaire en gérant correctement les champs optionnels.
-        
-        Returns:
-            Dict[str, Any]: Dictionnaire contenant la configuration sérialisée
-        """
-        output = {}
-        
-        # Parcourir tous les champs de la classe
-        for field_name, field_info in self.__dataclass_fields__.items():
-            # Ne pas sérialiser les champs privés
-            if field_name.startswith('_'):
-                continue
-                
-            try:
-                # Récupérer la valeur du champ
-                value = getattr(self, field_name, None)
-                
-                # Ignorer les valeurs None
-                if value is None:
-                    continue
-                
-                # Utiliser la méthode de conversion de la classe parente
-                serialized_value = self._convert_to_serializable(value)
-                
-                # Pour les listes, tuples et dictionnaires vides, on les inclut
-                if isinstance(serialized_value, (list, dict, tuple, set)) and not serialized_value:
-                    output[field_name] = serialized_value
-                    continue
-                    
-                # Pour les autres types, on vérifie s'ils sont différents de la valeur par défaut
-                if hasattr(field_info, 'default'):
-                    default_value = field_info.default
-                    # Si la valeur est égale à la valeur par défaut, on saute
-                    if value == default_value:
-                        continue
-                
-                # Pour les champs sans valeur par défaut ou avec une valeur différente
-                output[field_name] = serialized_value
-                
-            except Exception as e:
-                error_type = type(e).__name__
-                print(f"Avertissement: Impossible de sérialiser le champ {field_name} (type: {type(value).__name__}): {error_type} - {str(e)}")
-                # On inclut quand même le champ avec une valeur d'erreur pour le débogage
-                output[f"{field_name}_error"] = f"SerializationError: {error_type} - {str(e)}"
-        
-        return output
-
-
-@dataclass
-class MemoryConfig:
-    """Configuration pour la mémoire du modèle.
-    
-    Attributes:
-        use_external_memory: Activer la mémoire externe
-        memory_size: Taille de la mémoire
-        memory_dim: Dimension des vecteurs de mémoire
-        num_memory_heads: Nombre de têtes pour l'attention sur la mémoire
-        memory_update_mechanism: Mécanisme de mise à jour de la mémoire
-    """
+class MemoryConfig(BaseConfig):
+    """Configuration pour la mémoire du modèle."""
     use_external_memory: bool = True
     memory_size: int = 64
     memory_dim: int = 256
     num_memory_heads: int = 4
-    memory_update_mechanism: str = "gru"
+    dropout_rate: float = 0.1
+    hidden_size: int = 256 # Doit correspondre à model_config.hidden_size
+    persistent_memory_size: int = 128
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit la configuration en dictionnaire."""
-        return {
-            'use_external_memory': self.use_external_memory,
-            'memory_size': self.memory_size,
-            'memory_dim': self.memory_dim,
-            'num_memory_heads': self.num_memory_heads,
-            'memory_update_mechanism': self.memory_update_mechanism
-        }  # 'gru', 'mlp', 'attention'
+    # Paramètres de récupération pour la recherche
+    k_top_stm: int = 5
+    k_top_pm: int = 5
+    memory_chunk_size: int = 512
+    retrieval_strategy: str = "cosine_similarity" # 'attention_retrieval' ou 'cosine_similarity'
+    similarity_exponent: float = 1.0
 
 
 @dataclass
-class TokenizerConfig:
-    """Configuration pour le tokenizer.
+class LongTermMemoryConfig(BaseConfig):
+    """Configuration pour la mémoire à long terme.
     
     Attributes:
-        vocab_size: Taille du vocabulaire
-        max_length: Longueur maximale des séquences
-        padding_side: Côté de padding ('left' ou 'right')
-        truncation: Activer la troncature
+        enabled: Activer la mémoire à long terme
+        memory_size: Taille de la mémoire à long terme (nombre d'entrées)
+        dimension: Dimension des vecteurs de mémoire
+        update_rate: Taux de mise à jour de la mémoire
+        similarity_threshold: Seuil de similarité pour la fusion d'entrées
+        persistence_path: Chemin pour la sauvegarde/chargement de la mémoire persistante
+        retrieval_strategy: Stratégie de récupération ('cosine', 'dot_product', 'attention')
+        top_k: Nombre maximum d'entrées récupérées
+        pruning_strategy: Stratégie d'élagage ('lru', 'least_similar', 'random')
     """
-    vocab_size: int = 50000
-    max_length: int = 512
-    padding_side: str = "right"
-    truncation: bool = True
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit la configuration en dictionnaire."""
-        return {
-            'vocab_size': self.vocab_size,
-            'max_length': self.max_length,
-            'padding_side': self.padding_side,
-            'truncation': self.truncation
-        }
+    enabled: bool = False
+    memory_size: int = 1024
+    dimension: int = 256
+    update_rate: float = 0.05
+    similarity_threshold: float = 0.7
+    persistence_path: Optional[str] = None
+    retrieval_strategy: str = "cosine"
+    top_k: int = 5
+    pruning_strategy: str = "lru"
+
+
+@dataclass
+class ReasoningConfig(BaseConfig):
+    """Configuration pour les modules de raisonnement."""
+    use_symbolic_module: bool = False
+    use_causal_reasoning: bool = False
+    use_planning_module: bool = False
+    use_bayesian_module: bool = False
+
+    # Paramètres pour NeurosymbolicReasoner
+    symbolic_dim: int = 64
+    num_inference_steps: int = 3
+    max_facts: int = 100
+
+    # Paramètres pour CausalInferenceEngine (si nécessaire)
+    causal_graph_path: Optional[str] = None
+
+    # Paramètres pour StructuredPlanner
+    num_planning_steps: int = 5
+    plan_dim: int = 64
 
 
 @dataclass
 class NeuroLiteConfig(BaseConfig):
-    """Configuration complète pour un modèle NeuroLite.
-    
-    Cette classe rassemble toutes les configurations nécessaires pour initialiser
-    et entraîner un modèle NeuroLite.
-    
-    Attributes:
-        model_config: Configuration de l'architecture du modèle
-        training_config: Configuration pour l'entraînement
-        logging_config: Configuration pour la journalisation
-        memory_config: Configuration pour la mémoire
-        tokenizer_config: Configuration pour le tokenizer
-        use_multimodal: Activer le traitement multimodal
-        modalities: Liste des modalités supportées
-        device: Appareil sur lequel exécuter le modèle
-        seed: Graine aléatoire pour la reproductibilité
-    """
-    # Configurations
+    """Configuration complète pour un modèle NeuroLite."""
     model_config: ModelArchitectureConfig = field(default_factory=ModelArchitectureConfig)
     training_config: TrainingConfig = field(default_factory=TrainingConfig)
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
     memory_config: MemoryConfig = field(default_factory=MemoryConfig)
+    long_term_memory_config: LongTermMemoryConfig = field(default_factory=LongTermMemoryConfig)
     tokenizer_config: TokenizerConfig = field(default_factory=TokenizerConfig)
+    reasoning_config: ReasoningConfig = field(default_factory=ReasoningConfig)
     
-    # Paramètres généraux
     use_multimodal: bool = False
-    modalities: List[str] = field(
-        default_factory=lambda: ["text", "image", "audio", "video", "graph"]
-    )
+    modalities: List[str] = field(default_factory=lambda: ["text", "image", "audio", "video", "graph"])
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
     
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convertit la configuration complète en dictionnaire en gérant correctement les configurations imbriquées.
-        
-        Returns:
-            Dict[str, Any]: Dictionnaire contenant toute la configuration sérialisée
-        """
-        output = {}
-        
-        # Liste des configurations à sérialiser avec leur nom d'attribut
-        configs_to_serialize = [
-            ('model_config', self.model_config),
-            ('training_config', self.training_config),
-            ('logging_config', self.logging_config),
-            ('memory_config', self.memory_config),
-            ('tokenizer_config', self.tokenizer_config)
-        ]
-        
-        # Sérialiser chaque configuration
-        for key, config in configs_to_serialize:
-            try:
-                if config is None:
-                    output[key] = None
-                    continue
-                    
-                # Essayer d'abord to_dict() si disponible
-                if hasattr(config, 'to_dict') and callable(getattr(config, 'to_dict')):
-                    try:
-                        serialized = config.to_dict()
-                        if serialized is not None:  # Ne pas ajouter si la sérialisation a échoué
-                            output[key] = serialized
-                        continue
-                    except Exception as e:
-                        print(f"Avertissement: Échec de to_dict() sur {key}: {e}")
-                
-                # Sinon, essayer de convertir en dict directement
-                try:
-                    if hasattr(config, '__dict__'):
-                        serialized = self._convert_to_serializable(config.__dict__)
-                        if serialized:  # Ne pas ajouter si le dictionnaire est vide
-                            output[key] = serialized
-                        continue
-                except Exception as e:
-                    print(f"Avertissement: Échec de la conversion de {key}.__dict__: {e}")
-                
-                # En dernier recours, convertir en chaîne
-                output[key] = str(config)
-                
-            except Exception as e:
-                print(f"Erreur critique lors de la sérialisation de {key}: {e}")
-                output[key] = None
-        
-        # Ajouter les champs simples avec des valeurs par défaut sécurisées
-        simple_fields = {
-            'use_multimodal': getattr(self, 'use_multimodal', False),
-            'modalities': getattr(self, 'modalities', []),
-            'device': str(getattr(self, 'device', 'cpu')),
-            'seed': getattr(self, 'seed', 42)
-        }
-        
-        # Ne pas écraser les valeurs existantes avec des valeurs par défaut
-        for key, default_value in simple_fields.items():
-            if key not in output:
-                output[key] = default_value
-        
-        # Nettoyer le dictionnaire de sortie
-        return {k: v for k, v in output.items() if v is not None}
-        
-    def __post_init__(self):
-        # S'assurer que les configurations sont des instances des bonnes classes
-        if not isinstance(self.model_config, ModelArchitectureConfig):
-            self.model_config = ModelArchitectureConfig(**self.model_config)
-        if not isinstance(self.training_config, TrainingConfig):
-            self.training_config = TrainingConfig(**self.training_config)
-        if not isinstance(self.logging_config, LoggingConfig):
-            self.logging_config = LoggingConfig(**self.logging_config)
-        if not isinstance(self.memory_config, MemoryConfig):
-            self.memory_config = MemoryConfig(**self.memory_config)
-        if not isinstance(self.tokenizer_config, TokenizerConfig):
-            self.tokenizer_config = TokenizerConfig(**self.tokenizer_config)
+    use_torch_compile: bool = field(default=False, metadata={"help": "Activer torch.compile pour optimiser le modèle."})
+    torch_compile_mode: Optional[str] = field(default="default", metadata={"help": "Mode pour torch.compile."})
+    torch_compile_backend: Optional[str] = field(default=None, metadata={"help": "Backend pour torch.compile."})
+    torch_compile_options: Optional[Dict[str, Any]] = field(default=None, metadata={"help": "Options pour torch.compile."})
     
-    # Méthodes de classe pour les configurations prédéfinies
+    def __post_init__(self):
+        """Re-instancie récursivement les dataclasses à partir des dictionnaires après le chargement."""
+        for field_name, field_type in self.__annotations__.items():
+            # Obtenir la valeur actuelle du champ
+            current_value = getattr(self, field_name)
+            
+            # Vérifier si la valeur est un dictionnaire et si le type attendu est une dataclass
+            # (On vérifie s'il a __dataclass_fields__ pour être sûr)
+            if isinstance(current_value, dict) and hasattr(field_type, '__dataclass_fields__'):
+                # Créer une instance de la dataclass à partir du dictionnaire
+                # Gérer le cas où le champ est une Union/Optional
+                actual_type = None
+                if hasattr(field_type, '__args__'):
+                    possible_types = [t for t in field_type.__args__ if t is not type(None)]
+                    if possible_types:
+                        actual_type = possible_types[0]
+                else:
+                    actual_type = field_type
+
+                if actual_type and hasattr(actual_type, '__dataclass_fields__'):
+                    try:
+                        new_value = actual_type(**current_value)
+                        setattr(self, field_name, new_value)
+                        if hasattr(new_value, '__post_init__'):
+                            new_value.__post_init__()
+                    except TypeError as e:
+                        # Gère les cas où current_value a des clés qui ne correspondent pas aux champs de actual_type
+                        print(f"Avertissement lors de la ré-instanciation de {actual_type.__name__}: {e}. Utilisation des valeurs par défaut.")
+                        setattr(self, field_name, actual_type())
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "NeuroLiteConfig":
-        """Crée une configuration à partir d'un dictionnaire.
+        config_dict = deepcopy(config_dict)
+        # Instantiate nested dataclasses from their dict representations
+        model_config = ModelArchitectureConfig.from_dict(config_dict.pop('model_config', {}))
+        training_config = TrainingConfig.from_dict(config_dict.pop('training_config', {}))
+        logging_config = LoggingConfig.from_dict(config_dict.pop('logging_config', {}))
+        memory_config = MemoryConfig.from_dict(config_dict.pop('memory_config', {}))
+        long_term_memory_config = LongTermMemoryConfig.from_dict(config_dict.pop('long_term_memory_config', {}))
+        tokenizer_config = TokenizerConfig.from_dict(config_dict.pop('tokenizer_config', {}))
+        reasoning_config = ReasoningConfig.from_dict(config_dict.pop('reasoning_config', {}))
         
-        Args:
-            config_dict: Dictionnaire contenant les paramètres de configuration
-            
-        Returns:
-            Une instance de NeuroLiteConfig
-        """
-        return cls(**config_dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit la configuration en dictionnaire.
-        
-        Returns:
-            Un dictionnaire contenant tous les paramètres de configuration
-        """
-        return {
-            "model_config": self.model_config.to_dict() if hasattr(self.model_config, 'to_dict') else vars(self.model_config),
-            "training_config": self.training_config.to_dict() if hasattr(self.training_config, 'to_dict') else vars(self.training_config),
-            "logging_config": self.logging_config.to_dict() if hasattr(self.logging_config, 'to_dict') else vars(self.logging_config),
-            "memory_config": self.memory_config.to_dict() if hasattr(self.memory_config, 'to_dict') else vars(self.memory_config),
-            "tokenizer_config": self.tokenizer_config.to_dict() if hasattr(self.tokenizer_config, 'to_dict') else vars(self.tokenizer_config),
-            "use_multimodal": self.use_multimodal,
-            "modalities": self.modalities,
-            "device": self.device,
-            "seed": self.seed
-        }
+        return cls(
+            model_config=model_config,
+            training_config=training_config,
+            logging_config=logging_config,
+            memory_config=memory_config,
+            long_term_memory_config=long_term_memory_config,
+            tokenizer_config=tokenizer_config,
+            reasoning_config=reasoning_config,
+            **config_dict
+        )
     
     def save_pretrained(self, save_directory: Union[str, os.PathLike]):
-        """Enregistre la configuration dans un répertoire.
-        
-        Args:
-            save_directory: Répertoire de destination
-        """
         if not os.path.exists(save_directory):
             os.makedirs(save_directory)
-        
         output_config_file = os.path.join(save_directory, "config.json")
         with open(output_config_file, "w", encoding="utf-8") as writer:
             writer.write(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
     
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike]) -> "NeuroLiteConfig":
-        """Charge une configuration à partir d'un répertoire ou d'un nom de modèle.
-        
-        Args:
-            pretrained_model_name_or_path: Chemin ou identifiant du modèle
-            
-        Returns:
-            Une instance de NeuroLiteConfig
-        """
         if os.path.isdir(pretrained_model_name_or_path):
             config_file = os.path.join(pretrained_model_name_or_path, "config.json")
         else:
-            # Ici, vous pourriez implémenter le téléchargement depuis un dépôt
             raise ValueError(f"Configuration non trouvée dans {pretrained_model_name_or_path}")
         
         with open(config_file, "r", encoding="utf-8") as reader:
-            text = reader.read()
+            config_dict = json.load(reader)
         
-        config_dict = json.loads(text)
         return cls.from_dict(config_dict)
     
-    # Configurations prédéfinies
-    
+    # --- Predefined static configurations ---
     @classmethod
     def tiny(cls) -> "NeuroLiteConfig":
         """Configuration pour un modèle très léger (~1-2Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=128,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            intermediate_size=512,
-        )
+        model_config = ModelArchitectureConfig(hidden_size=128, num_hidden_layers=4, num_attention_heads=4, intermediate_size=512)
         return cls(model_config=model_config)
     
     @classmethod
     def small(cls) -> "NeuroLiteConfig":
         """Configuration pour un modèle léger (~5-10Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=256,
-            num_hidden_layers=6,
-            num_attention_heads=8,
-            intermediate_size=1024,
-        )
+        model_config = ModelArchitectureConfig(hidden_size=256, num_hidden_layers=6, num_attention_heads=8, intermediate_size=1024)
         return cls(model_config=model_config)
     
     @classmethod
     def base(cls) -> "NeuroLiteConfig":
         """Configuration pour un modèle de base (~20-30Mo)."""
-        return cls()  # Utilise les valeurs par défaut
+        return cls()
     
     @classmethod
     def large(cls) -> "NeuroLiteConfig":
         """Configuration pour un grand modèle (~100-200Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=1024,
-            num_hidden_layers=24,
-            num_attention_heads=16,
-            intermediate_size=4096,
-        )
+        model_config = ModelArchitectureConfig(hidden_size=1024, num_hidden_layers=24, num_attention_heads=16, intermediate_size=4096)
         return cls(model_config=model_config)
     
     @classmethod
@@ -917,85 +938,5 @@ class NeuroLiteConfig(BaseConfig):
     def symbolic(cls) -> "NeuroLiteConfig":
         """Configuration pour un modèle avec raisonnement symbolique."""
         config = cls.base()
-        # Ajouter des configurations spécifiques au raisonnement symbolique
-        return config
-    @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "NeuroLiteConfig":
-        """Crée une configuration à partir d'un dictionnaire."""
-        return cls(**config_dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convertit la configuration complète en dictionnaire en gérant correctement les configurations imbriquées.
-        
-        Returns:
-            Dict[str, Any]: Dictionnaire contenant toute la configuration sérialisée
-        """
-        output = {}
-        for field_name, field_value in self.__dict__.items():
-            # Utiliser la méthode to_dict() si disponible, sinon utiliser la conversion générique
-            if hasattr(field_value, 'to_dict') and callable(field_value.to_dict):
-                output[field_name] = field_value.to_dict()
-            else:
-                output[field_name] = self._convert_to_serializable(field_value)
-        return output
-    
-    @classmethod
-    def tiny(cls) -> "NeuroLiteConfig":
-        """Configuration pour un modèle très léger (~1-2Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=128,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            intermediate_size=512,
-        )
-        memory_config = MemoryConfig(
-            memory_size=32,
-            memory_dim=128,
-            num_memory_heads=2
-        )
-        return cls(model_config=model_config, memory_config=memory_config)
-    
-    @classmethod
-    def small(cls) -> "NeuroLiteConfig":
-        """Configuration pour un modèle léger (~5-10Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=256,
-            num_hidden_layers=6,
-            num_attention_heads=8,
-            intermediate_size=1024,
-        )
-        memory_config = MemoryConfig(
-            memory_size=64,
-            memory_dim=256,
-            num_memory_heads=4
-        )
-        return cls(model_config=model_config, memory_config=memory_config)
-    
-    @classmethod
-    def base(cls) -> "NeuroLiteConfig":
-        """Configuration pour un modèle de base (~20-30Mo)."""
-        return cls()  # Utilise les valeurs par défaut
-    
-    @classmethod
-    def large(cls) -> "NeuroLiteConfig":
-        """Configuration pour un grand modèle (~100-200Mo)."""
-        model_config = ModelArchitectureConfig(
-            hidden_size=1024,
-            num_hidden_layers=24,
-            num_attention_heads=16,
-            intermediate_size=4096,
-        )
-        memory_config = MemoryConfig(
-            memory_size=256,
-            memory_dim=1024,
-            num_memory_heads=8
-        )
-        return cls(model_config=model_config, memory_config=memory_config)
-    
-    @classmethod
-    def base_symbolic(cls) -> "NeuroLiteConfig":
-        """Configuration pour un modèle de base avec raisonnement symbolique."""
-        config = cls.base()
-        # Ajouter des configurations spécifiques au raisonnement symbolique
+        # Specific symbolic reasoning configs would be set here
         return config

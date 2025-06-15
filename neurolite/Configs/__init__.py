@@ -18,12 +18,12 @@ __all__ = [
 tiny_config = NeuroLiteConfig.tiny
 small_config = NeuroLiteConfig.small
 base_config = NeuroLiteConfig.base
-base_symbolic_config = NeuroLiteConfig.base_symbolic
+symbolic_config = NeuroLiteConfig.symbolic
 
 # Ajout des alias à __all__
 __all__.extend([
     'tiny_config',
     'small_config',
     'base_config',
-    'base_symbolic_config',
+    'symbolic_config',
 ])

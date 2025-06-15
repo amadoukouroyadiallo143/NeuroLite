@@ -6,6 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, List, Union, Tuple, Any
+from dataclasses import dataclass
+
+from neurolite.Configs.config import MMImageDecoderConfig
+from .base_decoder import BaseDecoder
 
 
 class UpsampleBlock(nn.Module):
@@ -108,101 +112,68 @@ class UpsampleBlock(nn.Module):
         return x
 
 
-class ImageDecoder(nn.Module):
+class ImageDecoder(BaseDecoder):
     """
-    Décodeur pour la génération d'images à partir d'une représentation latente.
+    Décode une représentation latente pour générer une image.
     """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        output_channels: int = 3,
-        initial_size: int = 7,
-        initial_channels: int = 512,
-        output_size: int = 224,
-        num_upsamples: int = 5,
-        use_residual: bool = True,
-        dropout_rate: float = 0.1,
-        final_activation: str = "tanh"
-    ):
+    def __init__(self, config: MMImageDecoderConfig):
         """
-        Initialise le décodeur d'images.
+        Initialise le décodeur d'image.
         
         Args:
-            input_dim: Dimension d'entrée
-            output_channels: Nombre de canaux de sortie (3 pour RGB)
-            initial_size: Taille initiale de l'image spatiale
-            initial_channels: Nombre de canaux initiaux
-            output_size: Taille de sortie de l'image
-            num_upsamples: Nombre d'étapes de suréchantillonnage
-            use_residual: Si True, utilise des connexions résiduelles
-            dropout_rate: Taux de dropout
-            final_activation: Activation finale ("tanh", "sigmoid", "none")
+            config (MMImageDecoderConfig): La configuration pour le décodeur d'image.
         """
-        super().__init__()
-        
-        self.input_dim = input_dim
-        self.output_channels = output_channels
-        self.initial_size = initial_size
-        self.initial_channels = initial_channels
-        self.output_size = output_size
+        super().__init__(config)
+        self.config = config
         
         # Vérifier si la taille de sortie est cohérente
-        total_upsampling = 2 ** num_upsamples
-        assert output_size % total_upsampling == 0, \
-            f"output_size ({output_size}) must be divisible by total upsampling factor ({total_upsampling})"
+        total_upsampling = 2 ** config.num_upsamples
+        if config.target_image_size % (config.initial_size * total_upsampling) != 0:
+            raise ValueError(
+                f"La taille de sortie de l'image ({config.target_image_size}) n'est pas atteignable "
+                f"avec initial_size={config.initial_size} et num_upsamples={config.num_upsamples}."
+            )
         
         # Projection initiale du vecteur latent en feature map
         self.initial_projection = nn.Sequential(
-            nn.Linear(input_dim, initial_channels * initial_size * initial_size),
-            nn.Dropout(dropout_rate),
+            nn.Linear(config.input_dim, config.initial_channels * config.initial_size * config.initial_size),
+            nn.Dropout(config.dropout_rate),
             nn.GELU()
         )
         
         # Blocs de suréchantillonnage
         self.upsamples = nn.ModuleList()
         
-        current_channels = initial_channels
-        for i in range(num_upsamples):
-            # Réduire progressivement le nombre de canaux
-            out_channels = current_channels // 2
-            
-            # Dernière couche : ajuster pour avoir une puissance de 2 près de la taille de sortie
-            if i == num_upsamples - 1:
-                # Calculer le facteur de mise à l'échelle nécessaire
-                current_size = initial_size * (2 ** i)
-                scale_factor = output_size // current_size
-            else:
-                scale_factor = 2
+        current_channels = config.initial_channels
+        for i in range(config.num_upsamples):
+            out_channels = max(current_channels // 2, 32)
             
             self.upsamples.append(
                 UpsampleBlock(
                     in_channels=current_channels,
                     out_channels=out_channels,
-                    scale_factor=scale_factor,
-                    use_residual=use_residual
+                    scale_factor=2, # Chaque bloc double la résolution spatiale
+                    use_residual=config.use_residual
                 )
             )
-            
             current_channels = out_channels
         
         # Couche de sortie
         self.output_conv = nn.Conv2d(
             in_channels=current_channels,
-            out_channels=output_channels,
+            out_channels=config.output_channels,
             kernel_size=3,
             padding=1
         )
         
         # Activation finale
-        if final_activation == "tanh":
+        if config.final_activation == "tanh":
             self.final_activation = nn.Tanh()
-        elif final_activation == "sigmoid":
+        elif config.final_activation == "sigmoid":
             self.final_activation = nn.Sigmoid()
-        else:  # "none"
+        else:
             self.final_activation = nn.Identity()
         
-        # Initialisation des poids
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
@@ -219,21 +190,49 @@ class ImageDecoder(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
     
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        latent: torch.Tensor, 
+        targets: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
         """
         Décode une représentation latente en image.
-        
+        Si des cibles sont fournies, calcule aussi la perte de reconstruction.
+
         Args:
-            latent: Représentation latente [batch_size, input_dim]
-            
+            latent: Représentation latente [batch_size, input_dim].
+            targets: Image cible [batch_size, channels, height, width].
+
         Returns:
-            Image générée [batch_size, output_channels, output_size, output_size]
+            Dictionnaire contenant :
+            - 'output': Image générée [batch_size, C, H, W].
+            - 'loss': Perte de reconstruction (MSE) si `targets` est fourni.
+        """
+        generated_image = self.generate(latent)
+        
+        # Calcul de la perte si les cibles sont fournies
+        loss = torch.tensor(0.0, device=latent.device)
+        if targets is not None:
+            # S'assurer que les tailles correspondent pour le calcul de la perte
+            if generated_image.shape != targets.shape:
+                 targets = F.interpolate(targets, size=generated_image.shape[2:], mode='bilinear', align_corners=False)
+            loss = F.mse_loss(generated_image, targets)
+            
+        return {
+            'output': generated_image,
+            'loss': loss
+        }
+
+    @torch.no_grad()
+    def generate(self, latent: torch.Tensor) -> torch.Tensor:
+        """
+        Génère une image à partir d'un vecteur latent (mode inférence).
         """
         batch_size = latent.shape[0]
         
         # Projection initiale et reshaping
         x = self.initial_projection(latent)
-        x = x.view(batch_size, self.initial_channels, self.initial_size, self.initial_size)
+        x = x.view(batch_size, self.config.initial_channels, self.config.initial_size, self.config.initial_size)
         
         # Blocs de suréchantillonnage
         for upsample_block in self.upsamples:
@@ -244,36 +243,3 @@ class ImageDecoder(nn.Module):
         x = self.final_activation(x)
         
         return x
-
-    def generate(
-        self,
-        latent: torch.Tensor,
-        temperature: float = 1.0,
-        noise_level: float = 0.0
-    ) -> torch.Tensor:
-        """
-        Génère une image à partir d'une représentation latente.
-        
-        Args:
-            latent: Représentation latente [batch_size, input_dim]
-            temperature: Contrôle la variabilité des images générées
-            noise_level: Niveau de bruit ajouté pendant la génération
-            
-        Returns:
-            Image générée [batch_size, output_channels, output_size, output_size]
-        """
-        batch_size = latent.shape[0]
-        
-        # Ajouter du bruit au vecteur latent si nécessaire
-        if noise_level > 0:
-            noise = torch.randn_like(latent) * noise_level
-            latent = latent + noise
-        
-        # Appliquer la température
-        if temperature != 1.0:
-            latent = latent / temperature
-        
-        # Générer l'image
-        image = self.forward(latent)
-        
-        return image

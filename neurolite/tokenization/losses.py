@@ -14,66 +14,64 @@ from typing import Dict, List, Optional, Union, Tuple
 
 class MultimodalContrastiveLoss(nn.Module):
     """
-    Perte contrastive pour l'alignement des représentations multimodales.
-    
-    Implémente une variante de la perte InfoNCE qui encourage l'alignement
-    des représentations de différentes modalités correspondant aux mêmes concepts.
+    Perte contrastive pour l'alignement des représentations multimodales (InfoNCE).
+
+    Cette perte encourage les représentations de différentes modalités mais
+    du même item de données à être plus proches les unes des autres que des
+    représentations d'items de données différents.
     """
-    
+
     def __init__(self, temperature: float = 0.07):
         """
-        Initialise la perte contrastive multimodale.
-        
+        Initialise la perte contrastive.
+
         Args:
-            temperature: Température pour la normalisation softmax
+            temperature: Température pour la mise à l'échelle des logits de similarité.
         """
         super().__init__()
         self.temperature = temperature
-        self.cross_entropy = nn.CrossEntropyLoss()
-        self.cos_sim = nn.CosineSimilarity(dim=-1)
-    
-    def forward(
-        self,
-        features: torch.Tensor,
-        alignments: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        self.cross_entropy_loss = nn.CrossEntropyLoss()
+
+    def forward(self, features_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Calcule la perte contrastive pour les caractéristiques données.
-        
+        Calcule la perte contrastive sur un dictionnaire de caractéristiques multimodales.
+
         Args:
-            features: Caractéristiques encodées [batch_size, seq_len, hidden_size]
-            alignments: Tenseur indiquant quelles caractéristiques devraient être alignées
-                        Si None, utilise l'identité (chaque exemple s'aligne avec lui-même)
-            
+            features_dict: Dictionnaire de caractéristiques encodées, où chaque valeur
+                           est un tenseur de shape [batch_size, ..., hidden_dim].
+
         Returns:
-            Perte contrastive calculée
+            La perte contrastive calculée. Retourne 0 si moins de deux modalités
+            sont présentes.
         """
-        batch_size = features.size(0)
+        modalities = list(features_dict.keys())
+        if len(modalities) < 2:
+            return torch.tensor(0.0, device=next(iter(features_dict.values())).device)
+
+        # Agréger les features (par ex. par la moyenne) pour obtenir un vecteur par item
+        # Note : On suppose que la première dimension est le batch
+        aggregated_features = {
+            mod: torch.mean(feat, dim=1) for mod, feat in features_dict.items()
+        }
+
+        # Concaténer les features de toutes les modalités en un grand tenseur
+        all_features = torch.cat(list(aggregated_features.values()), dim=0)
+        all_features = F.normalize(all_features, p=2, dim=1) # [N * B, D]
+
+        # Calculer la matrice de similarité cosinus
+        similarity_matrix = torch.matmul(all_features, all_features.T) / self.temperature
+
+        # Créer les étiquettes pour la perte contrastive
+        batch_size = list(features_dict.values())[0].shape[0]
+        num_modalities = len(modalities)
         
-        # Normaliser les caractéristiques
-        normalized_features = F.normalize(features, p=2, dim=-1)
+        labels = torch.arange(batch_size, device=all_features.device)
+        labels = labels.repeat(num_modalities) # [0,1,2, 0,1,2, ...]
+
+        # La perte est calculée en comparant chaque modalité avec toutes les autres
+        total_loss = self.cross_entropy_loss(similarity_matrix, labels)
         
-        # Calculer la matrice de similarité
-        sim_matrix = torch.matmul(
-            normalized_features, normalized_features.transpose(-2, -1)
-        ) / self.temperature
-        
-        # Si aucun alignement fourni, utiliser l'identité
-        if alignments is None:
-            # Créer des étiquettes d'identité
-            labels = torch.arange(batch_size, device=features.device)
-            
-            # Masquer la diagonale pour éviter la trivialité
-            mask = torch.eye(batch_size, device=features.device, dtype=torch.bool)
-            sim_matrix = sim_matrix.masked_fill(mask, -float('inf'))
-        else:
-            # Utiliser les alignements fournis
-            labels = alignments
-        
-        # Calculer la perte
-        loss = self.cross_entropy(sim_matrix, labels)
-        
-        return loss
+        return total_loss
 
 
 class VQLoss(nn.Module):
@@ -260,8 +258,7 @@ class HierarchicalTokenizerLoss(nn.Module):
                 for j in range(i + 1, num_levels):
                     # Calculer la perte contrastive entre les niveaux i et j
                     level_contrastive = self.contrastive_loss(
-                        torch.cat([quantized_levels[i], quantized_levels[j]], dim=0)
-                    )
+                        {f'level_{i}': quantized_levels[i], f'level_{j}': quantized_levels[j]})
                     contrastive_losses.append(level_contrastive)
             
             if contrastive_losses:

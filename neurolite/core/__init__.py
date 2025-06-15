@@ -18,7 +18,9 @@ from .projection import (
 
 # Main model and config
 from .model import NeuroLiteModel
-from ..Configs.config import NeuroLiteConfig
+from .objective_encoder import ObjectiveEncoder
+from .ssm import SSMLayer
+from neurolite.Configs.config import NeuroLiteConfig
 
 __all__ = [
     # Mixer components

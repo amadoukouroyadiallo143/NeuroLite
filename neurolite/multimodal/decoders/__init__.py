@@ -7,11 +7,13 @@ from .image_decoder import ImageDecoder
 from .audio_decoder import AudioDecoder
 from .video_decoder import VideoDecoder
 from .graph_decoder import GraphDecoder
+from .base_decoder import BaseDecoder
 
 __all__ = [
-    'TextDecoder',
-    'ImageDecoder',
-    'AudioDecoder',
-    'VideoDecoder',
-    'GraphDecoder',
+    "TextDecoder",
+    "ImageDecoder",
+    "AudioDecoder",
+    "VideoDecoder",
+    "GraphDecoder",
+    "BaseDecoder",
 ]

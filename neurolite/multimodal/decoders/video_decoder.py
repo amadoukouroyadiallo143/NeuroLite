@@ -6,8 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, List, Union, Tuple, Any
+from dataclasses import dataclass
 
+from neurolite.Configs.config import MMVideoDecoderConfig
 from .image_decoder import ImageDecoder, UpsampleBlock
+from .base_decoder import BaseDecoder
 
 
 class TemporalUpsampleBlock(nn.Module):
@@ -164,266 +167,195 @@ class TemporalUpsampleBlock(nn.Module):
         return x
 
 
-class VideoDecoder(nn.Module):
+class VideoDecoder(BaseDecoder):
     """
-    Décodeur pour la génération de vidéos à partir d'une représentation latente.
+    Décode une représentation latente pour générer une séquence d'images (vidéo).
     """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        initial_time: int = 2,
-        initial_size: int = 7,
-        initial_channels: int = 512,
-        output_channels: int = 3,
-        output_time: int = 16,
-        output_size: int = 224,
-        num_temporal_upsamples: int = 3,
-        num_spatial_upsamples: int = 5,
-        use_image_decoder: bool = False,
-        use_residual: bool = True,
-        dropout_rate: float = 0.1,
-        final_activation: str = "tanh"
-    ):
+    def __init__(self, config: MMVideoDecoderConfig):
         """
         Initialise le décodeur vidéo.
         
         Args:
-            input_dim: Dimension d'entrée
-            initial_time: Longueur temporelle initiale
-            initial_size: Taille spatiale initiale
-            initial_channels: Nombre de canaux initiaux
-            output_channels: Nombre de canaux de sortie (3 pour RGB)
-            output_time: Longueur temporelle de sortie
-            output_size: Taille spatiale de sortie
-            num_temporal_upsamples: Nombre d'étapes de suréchantillonnage temporel
-            num_spatial_upsamples: Nombre d'étapes de suréchantillonnage spatial
-            use_image_decoder: Si True, utilise un décodeur d'image pour chaque trame
-            use_residual: Si True, utilise des connexions résiduelles
-            dropout_rate: Taux de dropout
-            final_activation: Activation finale ("tanh", "sigmoid", "none")
+            config (MMVideoDecoderConfig): La configuration pour le décodeur vidéo.
         """
-        super().__init__()
-        
-        self.input_dim = input_dim
-        self.initial_time = initial_time
-        self.initial_size = initial_size
-        self.initial_channels = initial_channels
-        self.output_channels = output_channels
-        self.output_time = output_time
-        self.output_size = output_size
-        self.use_image_decoder = use_image_decoder
-        
-        # Vérifier la cohérence des dimensions
-        temporal_upsampling = 2 ** num_temporal_upsamples
-        spatial_upsampling = 2 ** num_spatial_upsamples
-        
-        assert output_time % (temporal_upsampling * initial_time) == 0, \
-            f"output_time ({output_time}) must be divisible by total temporal upsampling factor ({temporal_upsampling * initial_time})"
-        
-        assert output_size % (spatial_upsampling * initial_size) == 0, \
-            f"output_size ({output_size}) must be divisible by total spatial upsampling factor ({spatial_upsampling * initial_size})"
-        
-        # Facteurs de mise à l'échelle finaux
-        self.final_temporal_factor = output_time // (initial_time * (2 ** (num_temporal_upsamples - 1)))
-        self.final_spatial_factor = output_size // (initial_size * (2 ** (num_spatial_upsamples - 1)))
+        super().__init__(config)
+        self.config = config
         
         # Projection initiale du vecteur latent
         self.initial_projection = nn.Sequential(
-            nn.Linear(input_dim, initial_channels * initial_time * initial_size * initial_size),
-            nn.Dropout(dropout_rate),
+            nn.Linear(config.input_dim, config.initial_channels * config.initial_time * config.initial_size * config.initial_size),
+            nn.Dropout(config.dropout_rate),
             nn.GELU()
         )
         
-        if use_image_decoder:
-            # Utiliser un décodeur d'image pour chaque trame
-            self.image_decoder = ImageDecoder(
-                input_dim=input_dim // initial_time,
-                output_channels=output_channels,
-                initial_size=initial_size,
-                initial_channels=initial_channels,
-                output_size=output_size,
-                num_upsamples=num_spatial_upsamples,
-                use_residual=use_residual,
-                dropout_rate=dropout_rate,
-                final_activation=final_activation
-            )
+        # Blocs de suréchantillonnage
+        self.upsamples = nn.ModuleList()
+        current_channels = config.initial_channels
+        
+        # Déterminer le nombre maximum d'itérations
+        num_iterations = max(config.num_temporal_upsamples, config.num_spatial_upsamples)
+        
+        for i in range(num_iterations):
+            out_channels = max(current_channels // 2, 16)
             
-            # Projection temporelle
-            self.temporal_projection = nn.Sequential(
-                nn.Linear(input_dim, input_dim),
-                nn.GELU(),
-                nn.Linear(input_dim, output_time * (input_dim // initial_time))
-            )
-        else:
-            # Blocs de suréchantillonnage combiné spatio-temporel
-            self.upconv_blocks = nn.ModuleList()
-            
-            current_channels = initial_channels
-            
-            # D'abord, effectuer le suréchantillonnage temporel
-            for i in range(num_temporal_upsamples):
-                # Réduire progressivement le nombre de canaux
-                out_channels = max(current_channels // 2, 64)
-                
-                # Dernier bloc temporel : ajustement spécial
-                if i == num_temporal_upsamples - 1:
-                    temporal_factor = self.final_temporal_factor
-                else:
-                    temporal_factor = 2
-                
-                self.upconv_blocks.append(
+            # Déterminer si un suréchantillonnage temporel/spatial est nécessaire à cette étape
+            temporal_upsample = i < config.num_temporal_upsamples
+            spatial_upsample = i < config.num_spatial_upsamples
+
+            self.upsamples.append(
                     TemporalUpsampleBlock(
                         in_channels=current_channels,
                         out_channels=out_channels,
-                        temporal_kernel_size=3,
-                        spatial_kernel_size=3,
-                        temporal_upsample=True,
-                        spatial_upsample=False,
-                        upsample_factor=temporal_factor,
-                        use_residual=use_residual,
-                        dropout_rate=dropout_rate
-                    )
+                    temporal_upsample=temporal_upsample,
+                    spatial_upsample=spatial_upsample,
+                    upsample_factor=2,
+                    use_residual=config.use_residual,
+                    dropout_rate=config.dropout_rate
                 )
-                
-                current_channels = out_channels
-            
-            # Ensuite, effectuer le suréchantillonnage spatial
-            for i in range(num_spatial_upsamples):
-                # Réduire progressivement le nombre de canaux
-                out_channels = max(current_channels // 2, 32)
-                
-                # Dernier bloc spatial : ajustement spécial
-                if i == num_spatial_upsamples - 1:
-                    spatial_factor = self.final_spatial_factor
-                else:
-                    spatial_factor = 2
-                
-                self.upconv_blocks.append(
-                    TemporalUpsampleBlock(
-                        in_channels=current_channels,
-                        out_channels=out_channels,
-                        temporal_kernel_size=3,
-                        spatial_kernel_size=3,
-                        temporal_upsample=False,
-                        spatial_upsample=True,
-                        upsample_factor=spatial_factor,
-                        use_residual=use_residual,
-                        dropout_rate=dropout_rate
-                    )
-                )
-                
-                current_channels = out_channels
+            )
+            current_channels = out_channels
             
             # Couche de sortie
             self.output_conv = nn.Conv3d(
                 in_channels=current_channels,
-                out_channels=output_channels,
-                kernel_size=(1, 3, 3),
-                padding=(0, 1, 1)
+            out_channels=config.output_channels,
+            kernel_size=3,
+            padding=1
             )
             
             # Activation finale
-            if final_activation == "tanh":
+        if config.final_activation == "tanh":
                 self.final_activation = nn.Tanh()
-            elif final_activation == "sigmoid":
+        elif config.final_activation == "sigmoid":
                 self.final_activation = nn.Sigmoid()
-            else:  # "none"
+        else:
                 self.final_activation = nn.Identity()
         
-        # Initialisation des poids
+        # Décodeur spatial (par image)
+        if config.use_ssm_layers:
+            self.spatial_decoder = nn.Sequential(*[
+                SSMLayer(
+                    dim=config.embedding_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor
+                ) for _ in range(config.num_spatial_layers)
+            ])
+        else:
+            spatial_decoder_layer = nn.TransformerDecoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=config.hidden_dim,
+                dropout=config.dropout_rate,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True
+            )
+            self.spatial_decoder = nn.TransformerDecoder(
+                decoder_layer=spatial_decoder_layer,
+                num_layers=config.num_spatial_layers
+            )
+
+        # Décodeur temporel (à travers les images)
+        if config.use_ssm_layers:
+            self.temporal_decoder = nn.Sequential(*[
+                SSMLayer(
+                    dim=config.embedding_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor
+                ) for _ in range(config.num_temporal_layers)
+            ])
+        else:
+            temporal_decoder_layer = nn.TransformerDecoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=config.hidden_dim,
+                dropout=config.dropout_rate,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True
+            )
+            self.temporal_decoder = nn.TransformerDecoder(
+                decoder_layer=temporal_decoder_layer,
+                num_layers=config.num_temporal_layers
+            )
+
+        # Le décodeur d'image final est utilisé pour générer chaque frame
+        self.final_image_decoder = ImageDecoder(config.image_decoder_config)
+        
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
         """Initialise les poids du modèle."""
-        if isinstance(module, nn.Linear):
+        if isinstance(module, (nn.Linear, nn.Conv3d)):
             nn.init.trunc_normal_(module.weight, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Conv3d):
-            nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, (nn.BatchNorm3d, nn.GroupNorm, nn.LayerNorm)):
+        elif isinstance(module, (nn.GroupNorm, nn.LayerNorm)):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
     
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        latent: torch.Tensor, 
+        targets: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
         """
         Décode une représentation latente en vidéo.
+        Si des cibles sont fournies, calcule aussi la perte de reconstruction.
         
         Args:
-            latent: Représentation latente [batch_size, input_dim]
+            latent: Représentation latente [batch_size, input_dim].
+            targets: Vidéo cible [batch_size, C, T, H, W].
             
         Returns:
-            Vidéo générée [batch_size, output_channels, output_time, output_size, output_size]
+            Dictionnaire contenant :
+            - 'output': Vidéo générée [batch_size, C, T, H, W].
+            - 'loss': Perte de reconstruction (MSE) si `targets` est fourni.
+        """
+        generated_video = self.generate(latent)
+
+        loss = torch.tensor(0.0, device=latent.device)
+        if targets is not None:
+            if generated_video.shape != targets.shape:
+                # Adapter les dimensions spatiales et temporelles
+                targets = F.interpolate(
+                    targets, 
+                    size=generated_video.shape[2:], # (T, H, W)
+                    mode='trilinear', 
+                    align_corners=False
+                )
+            loss = F.mse_loss(generated_video, targets)
+            
+        return {
+            'output': generated_video,
+            'loss': loss
+        }
+
+    @torch.no_grad()
+    def generate(self, latent: torch.Tensor) -> torch.Tensor:
+        """
+        Génère une vidéo à partir d'un vecteur latent (mode inférence).
         """
         batch_size = latent.shape[0]
         
-        if self.use_image_decoder:
-            # Projeter le vecteur latent en multiples vecteurs latents pour chaque trame
-            temporal_latents = self.temporal_projection(latent)
-            temporal_latents = temporal_latents.view(batch_size, self.output_time, -1)
-            
-            # Générer chaque trame indépendamment
-            frames = []
-            for t in range(self.output_time):
-                frame_latent = temporal_latents[:, t]
-                frame = self.image_decoder(frame_latent)
-                frames.append(frame)
-            
-            # Concaténer les trames
-            video = torch.stack(frames, dim=2)  # [B, C, T, H, W]
-        else:
-            # Projection initiale et reshaping
-            x = self.initial_projection(latent)
-            x = x.view(
-                batch_size,
-                self.initial_channels,
-                self.initial_time,
-                self.initial_size,
-                self.initial_size
+        x = self.initial_projection(latent)
+        x = x.view(batch_size, self.config.initial_channels, self.config.initial_time, self.config.initial_size, self.config.initial_size)
+        
+        for upsample_block in self.upsamples:
+            x = upsample_block(x)
+        
+        x = self.output_conv(x)
+        x = self.final_activation(x)
+        
+        # Redimensionnement final pour correspondre exactement à la sortie désirée
+        if x.shape[2:] != (self.config.output_time, self.config.output_size, self.config.output_size):
+             x = F.interpolate(
+                x, 
+                size=(self.config.output_time, self.config.output_size, self.config.output_size), 
+                mode='trilinear', 
+                align_corners=False
             )
             
-            # Blocs de suréchantillonnage
-            for upconv_block in self.upconv_blocks:
-                x = upconv_block(x)
-            
-            # Couche de sortie
-            x = self.output_conv(x)
-            video = self.final_activation(x)
-        
-        return video
-    
-    def generate(
-        self,
-        latent: torch.Tensor,
-        temperature: float = 1.0,
-        noise_level: float = 0.0
-    ) -> torch.Tensor:
-        """
-        Génère une vidéo à partir d'une représentation latente.
-        
-        Args:
-            latent: Représentation latente [batch_size, input_dim]
-            temperature: Contrôle la variabilité des vidéos générées
-            noise_level: Niveau de bruit ajouté pendant la génération
-            
-        Returns:
-            Vidéo générée [batch_size, output_channels, output_time, output_size, output_size]
-        """
-        batch_size = latent.shape[0]
-        
-        # Ajouter du bruit au vecteur latent si nécessaire
-        if noise_level > 0:
-            noise = torch.randn_like(latent) * noise_level
-            latent = latent + noise
-        
-        # Appliquer la température
-        if temperature != 1.0:
-            latent = latent / temperature
-        
-        # Générer la vidéo
-        video = self.forward(latent)
-        
-        return video
+        return x

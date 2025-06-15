@@ -8,9 +8,12 @@ from .continual import (
     ReplayBuffer,
     ProgressiveCompressor
 )
+from .curriculum import CurriculumManager, text_length_scorer
 
 __all__ = [
     'ContinualAdapter',
     'ReplayBuffer',
-    'ProgressiveCompressor'
+    'ProgressiveCompressor',
+    'CurriculumManager',
+    'text_length_scorer'
 ]

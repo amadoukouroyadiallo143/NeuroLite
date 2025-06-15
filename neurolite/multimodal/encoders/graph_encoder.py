@@ -5,7 +5,11 @@ Encodeur spécialisé pour les entrées sous forme de graphes.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
+from typing import Optional, Tuple, Dict, Union
+
+from neurolite.Configs.config import MMGraphEncoderConfig
+from .base_encoder import BaseEncoder
+from neurolite.core.ssm import SSMLayer
 
 
 class GraphAttentionLayer(nn.Module):
@@ -155,174 +159,120 @@ class GraphAttentionLayer(nn.Module):
             return output
 
 
-class GraphEncoder(nn.Module):
+class GraphEncoder(BaseEncoder):
     """
-    Encodeur pour les entrées de graphes, utilisant l'attention de graphe.
+    Encodeur pour les entrées de graphes, utilisant GAT ou SSM,
+    configuré via MMGraphEncoderConfig.
     """
-    
-    def __init__(
-        self,
-        output_dim: int,
-        node_feature_dim: int = 64,
-        hidden_dim: int = 256,
-        num_layers: int = 3,
-        num_heads: int = 8,
-        dropout_rate: float = 0.1,
-        residual: bool = True,
-        concat_heads: bool = True,
-        readout_method: str = "mean",
-        normalize_output: bool = True
-    ):
+    def __init__(self, config: MMGraphEncoderConfig):
         """
-        Initialise l'encodeur de graphes.
-        
-        Args:
-            output_dim: Dimension de sortie
-            node_feature_dim: Dimension des caractéristiques des nœuds
-            hidden_dim: Dimension cachée
-            num_layers: Nombre de couches GAT
-            num_heads: Nombre de têtes d'attention
-            dropout_rate: Taux de dropout
-            residual: Si True, ajoute des connexions résiduelles
-            concat_heads: Si True, concatène les sorties des têtes
-            readout_method: Méthode de readout ("mean", "sum", "max", "attention")
-            normalize_output: Si True, normalise la sortie
+        Initialise l'encodeur de graphes à partir d'un objet de configuration.
         """
-        super().__init__()
+        super().__init__(config)
+        self.config = config
+
+        self.node_embedding = nn.Embedding(config.num_node_types, config.hidden_dim)
         
-        self.output_dim = output_dim
-        self.readout_method = readout_method
-        self.normalize_output = normalize_output
-        
-        # Projection initiale des caractéristiques des nœuds
-        self.node_projection = nn.Sequential(
-            nn.Linear(node_feature_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(dropout_rate)
+        self.node_feature_projection = nn.Sequential(
+            nn.Linear(config.node_feature_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim)
         )
         
-        # Couches GAT
-        self.gat_layers = nn.ModuleList()
-        
-        # Première couche
-        self.gat_layers.append(
-            GraphAttentionLayer(
-                in_features=hidden_dim,
-                out_features=hidden_dim,
-                num_heads=num_heads,
-                concat=concat_heads,
-                dropout_rate=dropout_rate,
-                residual=residual
-            )
-        )
-        
-        # Couches intermédiaires
-        for _ in range(1, num_layers - 1):
-            self.gat_layers.append(
-                GraphAttentionLayer(
-                    in_features=hidden_dim,
-                    out_features=hidden_dim,
-                    num_heads=num_heads,
-                    concat=concat_heads,
-                    dropout_rate=dropout_rate,
-                    residual=residual
+        self.layers = nn.ModuleList()
+        if config.use_ssm:
+            for _ in range(config.num_layers):
+                self.layers.append(SSMLayer(
+                    dim=config.hidden_dim,
+                    d_state=config.ssm_d_state,
+                    d_conv=config.ssm_d_conv,
+                    expand_factor=config.ssm_expand_factor,
+                    bidirectional=config.ssm_bidirectional
+                ))
+        else: # GAT
+            for i in range(config.num_layers):
+                is_last_layer = i == config.num_layers - 1
+                self.layers.append(
+                    GraphAttentionLayer(
+                        in_features=config.hidden_dim,
+                        out_features=config.hidden_dim,
+                        num_heads=1 if is_last_layer else config.num_attention_heads,
+                        concat=not is_last_layer,
+                        dropout_rate=config.dropout_rate,
+                        residual=True
+                    )
                 )
-            )
         
-        # Dernière couche (peut avoir une seule tête ou plusieurs)
-        self.gat_layers.append(
-            GraphAttentionLayer(
-                in_features=hidden_dim,
-                out_features=hidden_dim,
-                num_heads=1,
-                concat=False,
-                dropout_rate=dropout_rate,
-                residual=residual
-            )
-        )
-        
-        # Module de readout par attention (si utilisé)
-        if readout_method == "attention":
-            self.attention_readout = nn.Sequential(
-                nn.Linear(hidden_dim, 1),
+        if config.pooling_method == "attention":
+            self.attention_pool = nn.Sequential(
+                nn.Linear(config.hidden_dim, 1),
                 nn.Softmax(dim=1)
             )
-        
-        # Projection de sortie
+
         self.output_projection = nn.Sequential(
-            nn.Linear(hidden_dim, output_dim),
-            nn.LayerNorm(output_dim) if normalize_output else nn.Identity(),
-            nn.Dropout(dropout_rate)
+            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(config.hidden_dim, config.output_dim)
         )
-    
+        
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, std=0.02)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
     def forward(
         self,
-        node_features: torch.Tensor,
-        adjacency_matrix: torch.Tensor,
-        node_mask: Optional[torch.Tensor] = None
+        inputs: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """
-        Encode des graphes.
+        Encode un graphe.
         
         Args:
-            node_features: Caractéristiques des nœuds [batch_size, num_nodes, node_feature_dim]
-            adjacency_matrix: Matrice d'adjacence [batch_size, num_nodes, num_nodes]
-            node_mask: Masque des nœuds [batch_size, num_nodes]
-            
+            inputs: Dictionnaire contenant:
+                - 'node_features': [batch, num_nodes, node_feature_dim]
+                - 'adjacency_matrix': [batch, num_nodes, num_nodes]
+                - 'node_types': [batch, num_nodes] (optionnel)
+                - 'node_mask': [batch, num_nodes] (optionnel, 1 pour les vrais noeuds)
+        
         Returns:
-            Représentation encodée [batch_size, output_dim]
+            Représentation encodée du graphe [batch_size, output_dim]
         """
-        batch_size, num_nodes = node_features.shape[0], node_features.shape[1]
-        
-        # Projection initiale des caractéristiques des nœuds
-        x = self.node_projection(node_features)
-        
-        # Si un masque de nœuds est fourni, l'appliquer à la matrice d'adjacence
-        if node_mask is not None:
-            # Créer un masque pour la matrice d'adjacence
-            adj_mask = node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
-            adjacency_matrix = adjacency_matrix * adj_mask
-        
-        # Passage à travers les couches GAT
-        for gat_layer in self.gat_layers:
-            x = gat_layer(x, adjacency_matrix)
-        
-        # Readout: agréger les caractéristiques des nœuds en une représentation de graphe
-        if node_mask is not None:
-            # Masquer les nœuds de padding
-            x = x * node_mask.unsqueeze(-1)
-        
-        if self.readout_method == "mean":
-            # Moyenne des caractéristiques des nœuds
+        node_features = inputs['node_features']
+        adj = inputs['adjacency_matrix']
+        node_types = inputs.get('node_types')
+        node_mask = inputs.get('node_mask')
+
+        # Projeter les caractéristiques et les types des nœuds
+        x = self.node_feature_projection(node_features)
+        if node_types is not None:
+            x = x + self.node_embedding(node_types)
+
+        # Appliquer les couches GAT/SSM
+        for layer in self.layers:
+            x = layer(x, adj) if isinstance(layer, GraphAttentionLayer) else layer(x)
+
+        # Appliquer le pooling pour obtenir une représentation globale du graphe
+        if self.config.pooling_method == "attention":
+            attention_weights = self.attention_pool(x)
             if node_mask is not None:
-                graph_embedding = x.sum(dim=1) / node_mask.sum(dim=1, keepdim=True).clamp(min=1)
+                attention_weights = attention_weights.masked_fill(node_mask.unsqueeze(-1) == 0, -1e9)
+                attention_weights = F.softmax(attention_weights, dim=1)
+            pooled_output = torch.sum(x * attention_weights, dim=1)
+        else: # "mean" pooling
+            if node_mask is not None:
+                # Moyenne uniquement sur les vrais nœuds
+                masked_x = x * node_mask.unsqueeze(-1)
+                pooled_output = masked_x.sum(dim=1) / node_mask.sum(dim=1, keepdim=True).clamp(min=1)
             else:
-                graph_embedding = x.mean(dim=1)
-        
-        elif self.readout_method == "sum":
-            # Somme des caractéristiques des nœuds
-            graph_embedding = x.sum(dim=1)
-        
-        elif self.readout_method == "max":
-            # Maximum des caractéristiques des nœuds
-            if node_mask is not None:
-                # Masquer les nœuds de padding avec une valeur très négative
-                masked_x = x.clone()
-                masked_x[~node_mask.bool().unsqueeze(-1)] = -1e9
-                graph_embedding = masked_x.max(dim=1)[0]
-            else:
-                graph_embedding = x.max(dim=1)[0]
-        
-        elif self.readout_method == "attention":
-            # Readout par attention pondérée
-            weights = self.attention_readout(x)
-            if node_mask is not None:
-                # Masquer les nœuds de padding
-                weights = weights * node_mask.unsqueeze(-1)
-                weights = weights / weights.sum(dim=1, keepdim=True).clamp(min=1e-9)
-            graph_embedding = (weights * x).sum(dim=1)
-        
+                pooled_output = x.mean(dim=1)
+
         # Projection finale
-        output = self.output_projection(graph_embedding)
+        output = self.output_projection(pooled_output)
         
         return output

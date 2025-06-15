@@ -7,7 +7,7 @@ dans un espace latent commun pour l'architecture NeuroLite.
 """
 
 from .tokenizer import NeuroLiteTokenizer
-from ..multimodal.encoders import (
+from neurolite.multimodal.encoders import (
     TextEncoder, 
     ImageEncoder, 
     AudioEncoder, 
@@ -19,10 +19,6 @@ from .quantizers import (
     ResidualVQ,
     HierarchicalVQ,
     DualCodebookVQ
-)
-from .projectors import (
-    CrossModalProjector,
-    CrossModalAligner
 )
 from .projectors import (
     CrossModalProjector
@@ -43,7 +39,6 @@ __all__ = [
     'HierarchicalVQ',
     'DualCodebookVQ',
     'CrossModalProjector',
-    'CrossModalAligner',
     'NeuralCompressor',
     'HierarchicalTokenizer',
     'MultimodalContrastiveLoss'
