@@ -32,7 +32,6 @@ models/*.pth
 checkpoints/
 *.ckpt
 saved_models/
-outputs/
 # Données d'entraînement (volumineux)
 data/
 # data/wikitext/*

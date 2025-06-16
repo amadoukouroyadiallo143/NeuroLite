@@ -1,0 +1,14 @@
+{
+  "hidden_size": 512,
+  "tokenizer_type": "bpe",
+  "vocab_size": 50000,
+  "projection_dropout": 0.1,
+  "compressor_bottleneck_dim": 256,
+  "num_quantizers": 4,
+  "codebook_size": 1024,
+  "commitment_weight": 0.25,
+  "ema_decay": 0.99,
+  "reconstruction_weight": 1.0,
+  "alignment_weight": 0.1,
+  "contrastive_temperature": 0.1
+}
