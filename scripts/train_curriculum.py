@@ -10,6 +10,8 @@ import argparse
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import get_scheduler
+# --- NOUVEAUX IMPORTS POUR TENSORBOARD ---
+from torch.utils.tensorboard import SummaryWriter
 
 # Ajouter la racine du projet au sys.path pour les importations locales
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -44,10 +46,11 @@ def parse_args():
     """Parse les arguments de la ligne de commande."""
     parser = argparse.ArgumentParser(description="Entraînement avec Curriculum Learning pour NeuroLite")
     parser.add_argument("--dataset_path", type=str, default="data/raw/mixture_of_thoughts/train", help="Chemin vers le dataset.")
-    parser.add_argument("--output_dir", type=str, default="./outputs/curriculum_learning", help="Répertoire de sortie.")
+    parser.add_argument("--tokenizer_path", type=str, default="./outputs/neurolite/neurolite_tokenizer", help="Chemin vers le tokenizer pré-entraîné.")
+    parser.add_argument("--output_dir", type=str, default="./outputs/neurolite/neurolite_model", help="Répertoire de sortie.")
     parser.add_argument("--num_train_epochs", type=int, default=5, help="Nombre d'époques d'entraînement.")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=16, help="Taille du batch d'entraînement par appareil.")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Nombre de pas pour l'accumulation de gradient.")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=64, help="Taille du batch d'entraînement par appareil.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=32, help="Nombre de pas pour l'accumulation de gradient.")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Taux d'apprentissage.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Pondération de la décroissance des poids.")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Norme maximale pour le clipping de gradient.")
@@ -117,34 +120,25 @@ def main():
         reasoning_config=reasoning_config
     )
 
-    # --- 2. Initialisation et Entraînement/Chargement du Tokenizer ---
-    tokenizer_path = Path(args.output_dir) / "tokenizer"
+    # --- 2. Chargement du Tokenizer pré-entraîné ---
+    tokenizer_path = Path(args.tokenizer_path)
+    if not tokenizer_path.exists() or not (tokenizer_path / "tokenizer_config.json").exists():
+        raise FileNotFoundError(
+            f"Tokenizer non trouvé dans '{tokenizer_path}'.\n"
+            f"Veuillez d'abord entraîner un tokenizer avec la commande :\n"
+            f"python scripts/train_tokenizer.py --output_dir {tokenizer_path}"
+        )
     
-    if tokenizer_path.exists() and (tokenizer_path / "tokenizer_config.json").exists():
-        print(f"Chargement du tokenizer existant depuis {tokenizer_path}...")
-        tokenizer = NeuroLiteTokenizer.from_pretrained(str(tokenizer_path), neurolite_config=config)
-    else:
-        print("Aucun tokenizer existant trouvé. Entraînement d'un nouveau tokenizer...")
-        tokenizer = NeuroLiteTokenizer(config.tokenizer_config, neurolite_config=config)
-        
-        # --- 3. Chargement des Données pour l'entraînement du tokenizer ---
-        print(f"Chargement du dataset depuis {args.dataset_path} pour le tokenizer...")
-        dataset_for_tokenizer = load_from_disk(Path(args.dataset_path))
-        
-        # On utilise tout le dataset disponible pour construire le meilleur vocabulaire possible
-        print("Construction du vocabulaire sur l'ensemble des données...")
-        tokenizer.build_vocab(dataset_for_tokenizer, text_column='text', chat_format=True)
-        
-        print(f"Sauvegarde du nouveau tokenizer dans {tokenizer_path}...")
-        tokenizer_path.mkdir(parents=True, exist_ok=True)
-        tokenizer.save_pretrained(str(tokenizer_path))
+    print(f"Chargement du tokenizer existant depuis {tokenizer_path}...")
+    tokenizer = NeuroLiteTokenizer.from_pretrained(str(tokenizer_path), neurolite_config=config)
 
-    # --- 3. Chargement des Données pour l'entraînement du modèle ---
+    # --- 3. Chargement et Préparation des Données ---
     print(f"Chargement du dataset depuis {args.dataset_path} pour l'entraînement du modèle...")
     dataset = load_from_disk(Path(args.dataset_path))
     dataset = dataset.map(preprocess_sft_dataset, num_proc=4)
 
     if args.max_train_samples > 0:
+        print(f"Utilisation d'un sous-ensemble de {args.max_train_samples} exemples pour l'entraînement.")
         dataset = dataset.select(range(args.max_train_samples))
     
     split_dataset = dataset.train_test_split(test_size=0.1)
@@ -226,7 +220,11 @@ def main():
 
     model_forward_kwargs = {'update_memory': True, 'return_symbolic': True, 'continuous_learning': True}
 
-    # --- 7. Entraînement ---
+    # --- 7. Configuration de TensorBoard ---
+    print("Configuration de TensorBoard...")
+    tensorboard_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "runs"))
+
+    # --- 8. Entraînement ---
     print("Initialisation du Trainer...")
     trainer = Trainer(
         model=model,
@@ -235,12 +233,15 @@ def main():
         eval_dataloader=eval_dataloader,
         optimizer=optimizer,
         scheduler=lr_scheduler,
-        model_forward_kwargs=model_forward_kwargs
+        model_forward_kwargs=model_forward_kwargs,
+        tensorboard_writer=tensorboard_writer  # Passer le writer au Trainer
     )
 
     print("Début de l'entraînement avec Curriculum Learning...")
     trainer.train()
 
+    # Fermer le writer de TensorBoard à la fin
+    tensorboard_writer.close()
     print("Entraînement terminé.")
     print(f"Modèle sauvegardé dans : {config.training_config.output_dir}")
 

@@ -9,6 +9,7 @@ import argparse
 import sys
 import os
 from pathlib import Path
+import time
 
 from datasets import load_from_disk
 
@@ -36,8 +37,14 @@ def parse_args():
     parser.add_argument(
         "--vocab_size", 
         type=int, 
-        default=50000, 
+        default=32000, 
         help="Taille du vocabulaire à construire."
+    )
+    parser.add_argument(
+        "--max_train_samples", 
+        type=int, 
+        default=0, 
+        help="Nombre max d'exemples pour l'entraînement du tokenizer (0 pour tous)."
     )
     parser.add_argument(
         "--hidden_size", 
@@ -49,6 +56,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    script_start_time = time.time()
     
     output_path = Path(args.output_dir)
     dataset_path = Path(args.dataset_path)
@@ -72,9 +80,18 @@ def main():
     print(f"Chargement du dataset depuis {train_dataset_path} pour l'entraînement du tokenizer...")
     dataset = load_from_disk(str(train_dataset_path))
     
+    # Appliquer le filtre max_train_samples si spécifié
+    if args.max_train_samples > 0:
+        if len(dataset) > args.max_train_samples:
+            print(f"Utilisation d'un sous-ensemble de {args.max_train_samples} exemples pour l'entraînement du tokenizer.")
+            dataset = dataset.select(range(args.max_train_samples))
+        else:
+            print(f"Le nombre d'échantillons demandé ({args.max_train_samples}) est supérieur ou égal au nombre total d'exemples ({len(dataset)}). Utilisation du dataset complet.")
+
     # 3. Configurer et initialiser le tokenizer
     print("Initialisation d'un nouveau tokenizer...")
-    # Le tokenizer a besoin d'une config minimale pour s'initialiser
+    # La taille du vocabulaire est maintenant contrôlée par la ligne de commande.
+    # Le tokenizer a besoin d'une config minimale pour s'initialiser.
     tokenizer_config = TokenizerConfig(
         vocab_size=args.vocab_size, 
         hidden_size=args.hidden_size
@@ -88,15 +105,35 @@ def main():
     print(f"Début de l'entraînement du tokenizer sur {len(dataset)} exemples...")
     print(f"Taille du vocabulaire cible : {args.vocab_size}")
     
+    # --- Mesure du temps d'entraînement ---
+    train_start_time = time.time()
     # La méthode build_vocab gère l'entraînement BPE
     tokenizer.build_vocab(dataset, text_column='text', chat_format=True)
+    train_elapsed_seconds = time.time() - train_start_time
+    # --- Fin de la mesure ---
     
     # 5. Sauvegarder le tokenizer
     print(f"Entraînement terminé. Sauvegarde du tokenizer dans : {output_path}")
     output_path.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(str(output_path))
     
-    print("\nOpération terminée avec succès.")
+    script_elapsed_seconds = time.time() - script_start_time
+
+    # --- Affichage des statistiques ---
+    print("\n" + "="*50)
+    print("Statistiques de l'entraînement du Tokenizer")
+    print("="*50)
+    print(f"Temps total d'exécution     : {script_elapsed_seconds:.2f} secondes")
+    print(f"Temps d'entraînement BPE pur : {train_elapsed_seconds:.2f} secondes")
+    
+    final_vocab_size = tokenizer.vocab_size
+    print(f"Taille du vocabulaire finale : {final_vocab_size} (Cible: {args.vocab_size})")
+
+    if final_vocab_size < args.vocab_size:
+        print("NOTE: La taille finale est inférieure à la cible. C'est normal si le corpus de texte est trop petit ou peu varié.")
+    print("="*50)
+    
+    print(f"\nOpération terminée avec succès.")
     print(f"Le tokenizer est prêt à être utilisé depuis le dossier : '{output_path}'")
 
 if __name__ == "__main__":

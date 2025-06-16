@@ -613,7 +613,7 @@ class TokenizerConfig(BaseConfig):
     tokenizer_type: str = 'bpe'
 
     # --- Configuration du Tokenizer de texte (BPE) ---
-    vocab_size: int = 32000
+    vocab_size: int = 50000
 
     # --- Configuration des modules multimodaux ---
     projection_dropout: float = 0.1
@@ -638,7 +638,7 @@ class ModelArchitectureConfig(BaseConfig):
     num_hidden_layers: int = 12
     num_attention_heads: int = 12
     intermediate_size: int = 1024
-    max_seq_length: int = 512
+    max_seq_length: int = 1024
     
     # --- Flags pour les modules principaux ---
     use_metacontroller: bool = False

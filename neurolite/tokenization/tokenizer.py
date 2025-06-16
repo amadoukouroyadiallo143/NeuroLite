@@ -14,6 +14,7 @@ from torch.nn import functional as F
 from typing import Dict, Any, Optional, List
 from collections import Counter
 from datasets import Dataset
+from tqdm import tqdm
 
 from neurolite.Configs.config import TokenizerConfig, NeuroLiteConfig
 from neurolite.multimodal.multimodal import MultiModalEncoders
@@ -42,7 +43,7 @@ class NeuroLiteTokenizer(nn.Module):
         # Initialisation du tokenizer sous-jacent pour le texte
         if self.tokenizer_type == 'bpe':
             self.text_tokenizer = BPETokenizer(
-                vocab_size=getattr(config, 'vocab_size', 30000), 
+                vocab_size=getattr(config, 'vocab_size', 50000), 
                 special_tokens=['[PAD]', '[UNK]', '[BOS]', '[EOS]']
             )
         else:
@@ -88,17 +89,19 @@ class NeuroLiteTokenizer(nn.Module):
         print(f"Training '{self.tokenizer_type}' tokenizer on the dataset...")
         
         def get_text_iterator():
+            progress_bar = tqdm(dataset, desc="[1/2] Preparing corpus")
             if chat_format:
-                for item in dataset:
+                for item in progress_bar:
                     yield "".join(msg['content'] for msg in item['messages'])
             else:
-                for item in dataset:
+                for item in progress_bar:
                     yield item[text_column]
         
-        corpus_iterator = get_text_iterator()
+        corpus = list(get_text_iterator())
         
         if self.tokenizer_type == 'bpe':
-            self.text_tokenizer.train(list(corpus_iterator))
+            print("\n[2/2] Starting BPE training... (this may take a while)")
+            self.text_tokenizer.train(corpus)
             self.vocab_size = self.text_tokenizer.get_vocab_size()
             print(f"BPE Vocabulary built. Total size: {self.vocab_size} tokens.")
 
@@ -235,8 +238,10 @@ class NeuroLiteTokenizer(nn.Module):
         with open(vocab_path, 'w') as f:
             json.dump(self.char_to_id, f, indent=2)
             
-        weights_path = os.path.join(save_directory, "tokenizer.pt")
-        torch.save(self.state_dict(), weights_path)
+        # On ne sauvegarde plus le state_dict du nn.Module.
+        # Ce rôle est laissé au modèle principal.
+        # weights_path = os.path.join(save_directory, "tokenizer.pt")
+        # torch.save(self.state_dict(), weights_path)
 
         # Sauvegarder la configuration spécifique au tokenizer de texte
         if self.text_tokenizer and hasattr(self.text_tokenizer, 'save'):
@@ -248,29 +253,40 @@ class NeuroLiteTokenizer(nn.Module):
         """
         Charge la configuration, le vocabulaire et les poids du tokenizer.
         """
+        # 1. Charger la config du tokenizer pour connaître la taille du vocabulaire cible.
         config_path = os.path.join(save_directory, "tokenizer_config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Fichier de configuration 'tokenizer_config.json' non trouvé dans {save_directory}")
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
-        config = TokenizerConfig.from_dict(config_dict)
+        tokenizer_config = TokenizerConfig.from_dict(config_dict)
+
+        # 2. Mettre à jour la config globale AVANT l'initialisation pour que les modules aient la bonne taille.
+        if hasattr(tokenizer_config, 'vocab_size') and tokenizer_config.vocab_size is not None:
+            neurolite_config.model_config.mm_text_encoder_config.vocab_size = tokenizer_config.vocab_size
+            if neurolite_config.model_config.mm_text_decoder_config:
+                neurolite_config.model_config.mm_text_decoder_config.vocab_size = tokenizer_config.vocab_size
         
-        instance = cls(config, neurolite_config)
+        # 3. Initialiser le tokenizer avec la configuration mise à jour.
+        instance = cls(tokenizer_config, neurolite_config)
         
-        vocab_path = os.path.join(save_directory, "vocab.json")
-        if os.path.exists(vocab_path):
-            with open(vocab_path, 'r') as f:
-                instance.char_to_id = json.load(f)
-            instance.id_to_char = {v: k for k, v in instance.char_to_id.items()}
-            instance.vocab_size = len(instance.char_to_id)
-            
-        weights_path = os.path.join(save_directory, "tokenizer.pt")
-        if os.path.exists(weights_path):
-            instance.load_state_dict(torch.load(weights_path, map_location=neurolite_config.device))
-        
-        # Charger la configuration spécifique au tokenizer de texte
+        # 4. Charger le vocabulaire du tokenizer BPE.
         text_tokenizer_path = os.path.join(save_directory, 'text_tokenizer')
-        if os.path.isdir(text_tokenizer_path):
+        if os.path.exists(text_tokenizer_path):
             if instance.tokenizer_type == 'bpe':
                 instance.text_tokenizer = BPETokenizer.load(text_tokenizer_path)
+                
+                # S'assurer que la taille du vocabulaire et la couche d'embedding sont parfaitement synchronisées.
+                final_vocab_size = instance.text_tokenizer.get_vocab_size()
+                instance.vocab_size = final_vocab_size
+                instance.config.vocab_size = final_vocab_size
+                
+                if 'text' in instance.encoders.encoders:
+                    text_encoder = instance.encoders.encoders['text']
+                    text_encoder.resize_token_embeddings(final_vocab_size)
+                    print(f"Tokenizer BPE chargé. Couche d'embedding du modèle synchronisée à {final_vocab_size} tokens.")
+        else:
+            print("Attention: Aucun dossier 'text_tokenizer' trouvé. Le tokenizer BPE n'a pas été chargé.")
 
         return instance
 

@@ -31,7 +31,8 @@ class Trainer:
         callbacks: Optional[List[TrainerCallback]] = None,
         metacontroller: Optional[MetaController] = None,
         curriculum_manager: Optional[CurriculumManager] = None,
-        model_forward_kwargs: Optional[Dict[str, Any]] = None
+        model_forward_kwargs: Optional[Dict[str, Any]] = None,
+        tensorboard_writer: Optional[Any] = None
     ):
         self.model = model
         self.config = config
@@ -52,6 +53,7 @@ class Trainer:
         self.global_step = 0
         self.state = {} # Pour stocker l'état de l'entraînement
         self.model_forward_kwargs = model_forward_kwargs or {}
+        self.tensorboard_writer = tensorboard_writer
 
     def _prepare_inputs(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Déplace un batch de données sur le bon appareil."""
@@ -135,6 +137,13 @@ class Trainer:
                 # Mettre à jour la barre de progression avec la perte actuelle
                 progress_bar.set_postfix({'loss': loss.item()})
                 
+                # --- LOGGING TENSORBOARD ---
+                if self.tensorboard_writer and self.global_step % self.config.training_config.logging_steps == 0:
+                    self.tensorboard_writer.add_scalar('Loss/train', loss.item(), self.global_step)
+                    if self.scheduler:
+                        self.tensorboard_writer.add_scalar('LearningRate', self.scheduler.get_last_lr()[0], self.global_step)
+                # -------------------------
+
                 self.callback_handler.on_step_end(self.state)
             
             # Évaluation à la fin de chaque époque
@@ -148,6 +157,10 @@ class Trainer:
                     # Formatter le nom de la métrique pour une meilleure lisibilité
                     metric_name = metric.replace('_', ' ').capitalize()
                     print(f"  {metric_name:<20}: {value:.4f}")
+                    # --- LOGGING TENSORBOARD ---
+                    if self.tensorboard_writer:
+                        self.tensorboard_writer.add_scalar(f'Evaluation/{metric_name}', value, self.global_step)
+                    # -------------------------
                 print("------------------------------------------\n")
                 
                 # Mettre à jour les modules dynamiques

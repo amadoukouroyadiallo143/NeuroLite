@@ -526,31 +526,11 @@ class HierarchicalMemory(nn.Module):
             
     def save_persistent_memory(self, path: str):
         """Sauvegarde la mémoire persistante sur disque"""
-        if hasattr(self.persistent_memory, 'save'):
-            self.persistent_memory.save(path)
-        else:
-            # Sauvegarde manuelle des tenseurs
-            state_dict = {
-                'memory_keys': self.persistent_memory.memory_keys,
-                'memory_values': self.persistent_memory.memory_values,
-                'memory_usage': self.persistent_memory.memory_usage
-                    if hasattr(self.persistent_memory, 'memory_usage') else None
-            }
-            torch.save(state_dict, path)
+        self.persistent_memory.save(path)
             
     def load_persistent_memory(self, path: str):
         """Charge la mémoire persistante depuis le disque"""
-        if hasattr(self.persistent_memory, 'load'):
-            self.persistent_memory.load(path)
-        else:
-            # Chargement manuel des tenseurs
-            state_dict = torch.load(path)
-            if hasattr(self.persistent_memory, 'memory_keys'):
-                self.persistent_memory.memory_keys = state_dict['memory_keys']
-            if hasattr(self.persistent_memory, 'memory_values'):
-                self.persistent_memory.memory_values = state_dict['memory_values']
-            if hasattr(self.persistent_memory, 'memory_usage') and state_dict['memory_usage'] is not None:
-                self.persistent_memory.memory_usage = state_dict['memory_usage']
+        self.persistent_memory.load(path)
 
 
 class VectorMemoryStore(nn.Module):
@@ -840,31 +820,23 @@ class VectorMemoryStore(nn.Module):
     
     def save(self, path: str):
         """Sauvegarde la mémoire sur disque"""
-        if hasattr(self, 'save'):
-            self.save(path)
-        else:
-            # Sauvegarde manuelle des tenseurs
-            state_dict = {
-                'memory_keys': self.memory_keys,
-                'memory_values': self.memory_values,
-                'memory_usage': self.memory_usage,
-                'active_entries': self.active_entries,
-                'metadata': self.metadata
-            }
-            torch.save(state_dict, path)
+        state_dict = {
+            'memory_keys': self.memory_keys,
+            'memory_values': self.memory_values,
+            'memory_usage': self.memory_usage,
+            'active_entries': self.active_entries,
+            'metadata': self.metadata
+        }
+        torch.save(state_dict, path)
         
     def load(self, path: str):
         """Charge la mémoire depuis le disque"""
-        if hasattr(self, 'load'):
-            self.load(path)
-        else:
-            # Chargement manuel des tenseurs
-            state_dict = torch.load(path)
-            self.memory_keys = state_dict['memory_keys']
-            self.memory_values = state_dict['memory_values']
-            self.memory_usage = state_dict['memory_usage']
-            self.active_entries = state_dict['active_entries']
-            self.metadata = state_dict['metadata']
+        state_dict = torch.load(path)
+        self.memory_keys = state_dict['memory_keys']
+        self.memory_values = state_dict['memory_values']
+        self.memory_usage = state_dict['memory_usage']
+        self.active_entries = state_dict['active_entries']
+        self.metadata = state_dict['metadata']
         
     def search(
         self, 
