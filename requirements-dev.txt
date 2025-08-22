@@ -1,0 +1,90 @@
+# =============================================================================
+# NeuroLite AGI - Dépendances de Développement et Entraînement
+# Packages supplémentaires pour l'entraînement, debugging et monitoring
+# =============================================================================
+
+# --- Entraînement et Optimisation ---
+accelerate>=0.25.0              # Hugging Face Accelerate pour optimisation
+deepspeed>=0.12.0               # Entraînement distribué et optimisations mémoire
+torch-optimizer>=0.3.0          # Optimizers avancés pour PyTorch
+
+# --- Monitoring et Logging ---
+wandb>=0.16.0                   # Weights & Biases pour tracking expérimentations
+tensorboard>=2.15.0             # Visualisation des métriques d'entraînement
+mlflow>=2.8.0                   # MLOps et gestion des modèles
+neptune-client>=1.8.0           # Alternative à W&B
+
+# --- Datasets et Preprocessing ---
+datasets>=2.15.0                # Hugging Face Datasets
+transformers>=4.35.0            # Pour l'intégration avec des modèles pré-entraînés
+tokenizers>=0.15.0              # Tokenizers rapides
+sentencepiece>=0.1.99           # Tokenization SentencePiece
+evaluate>=0.4.0                 # Métriques d'évaluation
+
+# --- Développement et Debugging ---
+ipython>=8.18.0                 # Shell interactif amélioré
+jupyter>=1.0.0                  # Notebooks pour expérimentation
+notebook>=7.0.0                 # Interface Jupyter
+jupyterlab>=4.0.0               # Interface moderne pour Jupyter
+
+# --- Profiling et Performance ---
+py-spy>=0.3.14                  # Profiler Python
+memory-profiler>=0.61.0         # Profiling mémoire
+line-profiler>=4.1.0            # Profiling ligne par ligne
+pyinstrument>=4.6.0             # Profiler statistique
+
+# --- Tests et Qualité de Code ---
+pytest>=7.4.0                   # Framework de tests
+pytest-cov>=4.1.0               # Couverture de code
+pytest-xdist>=3.5.0             # Tests parallèles
+black>=23.11.0                  # Formatage de code
+flake8>=6.1.0                   # Linting
+mypy>=1.7.0                     # Type checking
+pre-commit>=3.6.0               # Git hooks pour qualité code
+
+# --- Visualisation et Analyse ---
+matplotlib>=3.8.0               # Graphiques de base
+seaborn>=0.13.0                 # Visualisations statistiques
+plotly>=5.17.0                  # Graphiques interactifs
+bokeh>=3.3.0                    # Visualisations web
+
+# --- Utilitaires Scientifiques ---
+scipy>=1.11.0                   # Calculs scientifiques
+scikit-learn>=1.3.0             # Machine learning traditionnel
+pandas>=2.1.0                   # Manipulation de données
+polars>=0.19.0                  # Alternative rapide à pandas
+
+# --- Traitement Multimodal ---
+opencv-python>=4.8.0            # Computer vision
+Pillow>=10.1.0                  # Manipulation d'images
+librosa>=0.10.0                 # Audio processing
+torchaudio>=2.1.0               # Audio pour PyTorch
+torchvision>=0.16.0             # Vision pour PyTorch
+
+# --- Cloud et Infrastructure ---
+google-cloud-storage>=2.10.0    # Intégration GCS
+google-cloud-aiplatform>=1.38.0 # Vertex AI
+boto3>=1.34.0                   # AWS SDK (optionnel)
+azure-storage-blob>=12.19.0     # Azure Storage (optionnel)
+
+# --- Configuration et Sérialisation ---
+hydra-core>=1.3.0               # Configuration hiérarchique
+omegaconf>=2.3.0                # Configuration YAML
+pyyaml>=6.0.1                   # YAML parsing
+toml>=0.10.2                    # TOML parsing
+
+# --- Utilitaires Système ---
+psutil>=5.9.0                   # Monitoring système
+tqdm>=4.66.0                    # Barres de progression
+rich>=13.7.0                    # Output terminal enrichi
+click>=8.1.0                    # CLI interfaces
+
+# --- Sécurité et Validation ---
+cryptography>=41.0.0            # Cryptographie
+validators>=0.22.0              # Validation de données
+schema>=0.7.5                   # Validation de schémas
+
+# --- Optimisations Spéciales ---
+flash-attn>=2.4.0               # Flash Attention (si compatible GPU)
+apex                            # NVIDIA Apex (optionnel, installation manuelle)
+fairscale>=0.4.13               # Optimisations distributed training

@@ -1,0 +1,19 @@
+[project]
+name = "neurolite"
+version = "0.1.0"
+description = "A frugal AGI model"
+authors = [{name = "Amadou Kouro Diallo", email = "your.email@example.com"}]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "datasets",
+    "numpy",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["neurolite", "neurolite.*"]
